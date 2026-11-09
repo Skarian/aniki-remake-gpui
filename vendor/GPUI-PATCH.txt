@@ -17,10 +17,11 @@ Local changes, 2026-11-09:
   Only slot-0 texture bindings are cleared; other pipeline state is preserved.
   Reference: https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nf-dxgi1_3-idxgidevice3-trim
 
-Purpose: Aniki minimizes after a tracked game starts and takes focus, freeing every
-artwork and video image. The default renderer otherwise retains its full-size
-swap-chain and 4x MSAA path surfaces throughout gameplay. The process and
-window remain alive, preserving Apollo's application session and game tracking.
+Purpose: The direct preview/legacy frontend can minimize after a game takes
+focus, releasing images and reducing rendering surfaces. Normal sessions now
+use a native host and fully exit the GPUI frontend during gameplay; the same
+binary recreates the frontend under a black cover on return. The host preserves
+external-launcher lifetime and game tracking without retaining a renderer.
 
 No atlas allocator changes, rendering-quality changes, or video backend rewrite.
-The app's normal foreground-restore path shows the window when the game exits.
+The app's foreground-restore path reveals the prepared UI when the game exits.

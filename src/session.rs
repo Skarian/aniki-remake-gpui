@@ -1,4 +1,4 @@
-//! One executable, two roles. The host never initializes GPUI/SDL/media.
+//! One executable, two roles. The host never initializes GPUI/media.
 //! Anonymous inherited pipes carry lifecycle messages; no server or Apollo API.
 use crate::{
     launch::{self, LaunchEvent},
@@ -10,7 +10,11 @@ use std::{
     os::windows::process::CommandExt,
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+    },
     time::{Duration, Instant},
 };
 use windows::{
@@ -34,6 +38,7 @@ pub enum UiMessage {
         hwnd: u64,
         name: String,
         platform: String,
+        game_id: String,
     },
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -213,6 +218,7 @@ impl Frontend {
     }
 }
 
+static RECOVER_INPUT: AtomicBool = AtomicBool::new(false);
 struct Cover(HWND);
 impl Cover {
     fn new() -> anyhow::Result<Self> {
@@ -320,6 +326,10 @@ impl Drop for Cover {
 }
 unsafe extern "system" fn cover_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match message {
+        WM_KEYDOWN | WM_SYSKEYDOWN | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+            RECOVER_INPUT.store(true, Ordering::Relaxed);
+            unsafe { DefWindowProcW(hwnd, message, wp, lp) }
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => unsafe {
             let mut paint = PAINTSTRUCT::default();
@@ -365,6 +375,8 @@ pub fn run(base: &Path, args: &[String]) -> anyhow::Result<()> {
     let mut recovery_count = 0;
     let mut resume_args = args.to_vec();
     let mut shutdown_at = None;
+    let mut game_cancel: Option<Arc<AtomicBool>> = None;
+    let mut recovery_controller: Option<crate::controller::Controller> = None;
     crate::log(base, "host_started", "single_binary", clock);
     loop {
         if instance.activation_requested() {
@@ -390,6 +402,39 @@ pub fn run(base: &Path, args: &[String]) -> anyhow::Result<()> {
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+        }
+        // Start controller support only while the black cover is foreground.
+        // Nothing is polled or consumed by the host during ordinary gameplay.
+        let exposed = state == State::Playing && unsafe { GetForegroundWindow() == cover.0 };
+        let keyboard_recovery = RECOVER_INPUT.swap(false, Ordering::Relaxed);
+        let mut button_recovery = false;
+        if exposed {
+            let controller = recovery_controller
+                .get_or_insert_with(|| crate::controller::Controller::start(base.join("SDL2.dll")));
+            controller.poll();
+            button_recovery = controller.any_pressed();
+        } else {
+            recovery_controller = None;
+        }
+        if exposed && (keyboard_recovery || button_recovery) {
+            if let Some(cancel) = game_cancel.take() {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            game_events = None;
+            recovery_controller = None;
+            state = State::Returning;
+            closing_ui = true;
+            shutdown_at = Some(Instant::now());
+            if let Some(ui) = ui.as_mut() {
+                ui.send(&HostMessage::Shutdown);
+            }
+            cover.front();
+            crate::log(
+                base,
+                "cover_input_recovery",
+                "return without terminating game",
+                clock,
+            );
         }
         let incoming: Vec<_> = ui
             .as_ref()
@@ -419,14 +464,20 @@ pub fn run(base: &Path, args: &[String]) -> anyhow::Result<()> {
                     hwnd,
                     name,
                     platform,
+                    game_id,
                 } if state == State::Browsing => {
                     resume_args = args.to_vec();
                     resume_args.extend(["--resume-platform".into(), platform]);
+                    resume_args.extend([
+                        "--resume-game".into(),
+                        game_id,
+                        "--resume-details".into(),
+                    ]);
                     cover.behind(HWND(hwnd as usize as *mut _), true);
                     let (tx, rx) = mpsc::channel();
                     game_events = Some(rx);
                     state = State::Launching;
-                    launch::start(plan, tx);
+                    game_cancel = Some(launch::start(plan, tx));
                     crate::log(base, "host_launch", &name, clock);
                 }
                 _ => {}
@@ -452,10 +503,19 @@ pub fn run(base: &Path, args: &[String]) -> anyhow::Result<()> {
                         crate::log(base, "game_focus", &format!("hwnd={hwnd}"), clock);
                     }
                 }
-                LaunchEvent::Ended => {
+                LaunchEvent::Ended | LaunchEvent::WindowClosed => {
+                    if matches!(event, LaunchEvent::WindowClosed) {
+                        crate::log(
+                            base,
+                            "game_windows_closed",
+                            "process may still be exiting",
+                            clock,
+                        );
+                    }
                     cover.front();
                     state = State::Returning;
                     game_events = None;
+                    game_cancel = None;
                     closing_ui = true;
                     shutdown_at = Some(Instant::now());
                     if let Some(ui) = ui.as_mut() {
@@ -550,6 +610,7 @@ mod tests {
             hwnd: 42,
             name: "A game".into(),
             platform: "Nintendo Switch".into(),
+            game_id: "game-id".into(),
             plan: LaunchPlan {
                 arguments: "--game \"C:\\Games\\a b.rom\"".into(),
                 error: "line one\nline two".into(),

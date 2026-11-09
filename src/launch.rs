@@ -4,19 +4,26 @@ use std::{
     collections::HashSet,
     path::Path,
     process::{Child, Command},
-    sync::mpsc::Sender,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
     time::{Duration, Instant},
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HWND},
+        Foundation::{CloseHandle, HWND, LPARAM},
         System::{Diagnostics::ToolHelp::*, Registry::*, Threading::*},
         UI::{
             Shell::ShellExecuteW,
-            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SW_SHOWNORMAL},
+            WindowsAndMessaging::{
+                EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
+                SW_SHOWNORMAL,
+            },
         },
     },
-    core::{PCWSTR, PWSTR, w},
+    core::{BOOL, PCWSTR, PWSTR, w},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -24,6 +31,7 @@ pub enum LaunchEvent {
     Started,
     Focused(u64),
     Ended,
+    WindowClosed,
     Failed(String),
 }
 #[derive(Clone, Debug)]
@@ -110,7 +118,50 @@ fn steam_running(app: &str) -> bool {
             && value != 0
     }
 }
-pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
+// A lingering emulator process is not a playable session once all its windows
+// have gone. Minimized windows remain visible to Win32 and do not trigger this.
+#[derive(Default)]
+struct WindowLiveness {
+    missing_since: Option<Instant>,
+}
+impl WindowLiveness {
+    fn ended(&mut self, focused: bool, visible: bool, now: Instant) -> bool {
+        if !focused || visible {
+            self.missing_since = None;
+            return false;
+        }
+        now.duration_since(*self.missing_since.get_or_insert(now)) >= Duration::from_secs(2)
+    }
+}
+fn has_game_window(pids: &HashSet<u32>) -> bool {
+    struct Search<'a> {
+        pids: &'a HashSet<u32>,
+        found: bool,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> BOOL {
+        let search = unsafe { &mut *(param.0 as *mut Search<'_>) };
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        }
+        if search.pids.contains(&pid) && unsafe { IsWindowVisible(hwnd).as_bool() } {
+            search.found = true;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut search = Search { pids, found: false };
+    unsafe {
+        let _ = EnumWindows(
+            Some(visit),
+            LPARAM((&mut search as *mut Search<'_>) as isize),
+        );
+    }
+    search.found
+}
+pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) -> Arc<AtomicBool> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stopped = cancel.clone();
     std::thread::spawn(move || {
         let fail = |message: String| {
             let _ = tx.send(LaunchEvent::Failed(message));
@@ -174,6 +225,7 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
         let mut started = false;
         let mut focused = false;
         let mut gone = 0u8;
+        let mut windows = WindowLiveness::default();
         let install = plan
             .install_dir
             .trim_end_matches(['\\', '/'])
@@ -181,14 +233,22 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
             + "\\";
         loop {
             std::thread::sleep(Duration::from_millis(350));
+            if stopped.load(Ordering::Relaxed) {
+                break;
+            }
             let live = processes();
             descendants(&live, &mut tracked);
-            let matched = live.iter().any(|p| {
-                tracked.contains(&p.pid)
-                    || (!baseline.contains(&p.pid)
-                        && install.len() > 3
-                        && p.path.to_lowercase().starts_with(&install))
-            });
+            let game_pids: HashSet<u32> = live
+                .iter()
+                .filter(|p| {
+                    tracked.contains(&p.pid)
+                        || (!baseline.contains(&p.pid)
+                            && install.len() > 3
+                            && p.path.to_lowercase().starts_with(&install))
+                })
+                .map(|p| p.pid)
+                .collect();
+            let matched = !game_pids.is_empty();
             let active = matched || (plan.kind == "steam" && steam_running(&plan.steam_id));
             if active {
                 gone = 0;
@@ -204,13 +264,7 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
                     unsafe {
                         GetWindowThreadProcessId(foreground, Some(&mut pid));
                     }
-                    if live.iter().any(|p| {
-                        p.pid == pid
-                            && (tracked.contains(&p.pid)
-                                || (!baseline.contains(&p.pid)
-                                    && install.len() > 3
-                                    && p.path.to_lowercase().starts_with(&install)))
-                    }) {
+                    if game_pids.contains(&pid) {
                         focused = true;
                         let _ = tx.send(LaunchEvent::Focused(foreground.0 as usize as u64));
                     }
@@ -225,16 +279,34 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
                 fail("The game did not start within 90 seconds. Return to the library and try again.".into());
                 break;
             }
+            if windows.ended(focused, has_game_window(&game_pids), Instant::now()) {
+                let _ = tx.send(LaunchEvent::WindowClosed);
+                break;
+            }
             if let Some(c) = child.as_mut() {
                 let _ = c.try_wait();
             }
         }
     });
+    cancel
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn window_return_requires_focus_and_continuous_absence() {
+        let n = Instant::now();
+        let mut state = WindowLiveness::default();
+        assert!(!state.ended(false, false, n));
+        assert!(!state.ended(false, false, n + Duration::from_secs(30)));
+        assert!(!state.ended(true, false, n + Duration::from_secs(31)));
+        assert!(!state.ended(true, false, n + Duration::from_secs(32)));
+        // A replacement or minimized window resets the grace period.
+        assert!(!state.ended(true, true, n + Duration::from_secs(33)));
+        assert!(!state.ended(true, false, n + Duration::from_secs(34)));
+        assert!(state.ended(true, false, n + Duration::from_secs(36)));
+    }
     #[test]
     fn tracks_descendants_after_parent_exits() {
         let mut tracked = HashSet::from([10]);

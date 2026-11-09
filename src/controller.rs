@@ -44,6 +44,7 @@ pub struct Controller {
     device: i32,
     sample: Arc<Mutex<Sample>>,
     stop: Arc<AtomicBool>,
+    require_neutral: bool,
 }
 impl Controller {
     pub fn new() -> Self {
@@ -56,6 +57,7 @@ impl Controller {
             device: -1,
             sample: Arc::new(Mutex::new(Sample::default())),
             stop: Arc::new(AtomicBool::new(false)),
+            require_neutral: false,
         }
     }
     pub fn start(path: PathBuf) -> Self {
@@ -115,6 +117,12 @@ impl Controller {
             self.held = None;
         }
         let mut buttons = state.Gamepad.wButtons.0;
+        if state.Gamepad.bLeftTrigger > 30 {
+            buttons |= 0x400;
+        }
+        if state.Gamepad.bRightTrigger > 30 {
+            buttons |= 0x800;
+        }
         if state.Gamepad.sThumbLX > 18000 {
             buttons |= XINPUT_GAMEPAD_DPAD_RIGHT.0
         }
@@ -129,7 +137,19 @@ impl Controller {
         }
         self.process(buttons, Instant::now())
     }
+    pub fn require_release(&mut self) {
+        self.require_neutral = true;
+    }
+    pub fn any_pressed(&self) -> bool {
+        self.previous != 0
+    }
     fn process(&mut self, buttons: u16, now: Instant) -> Vec<Input> {
+        if self.require_neutral {
+            self.require_neutral = buttons != 0;
+            self.previous = buttons;
+            self.held = None;
+            return vec![];
+        }
         let mappings = [
             (XINPUT_GAMEPAD_DPAD_LEFT.0, Input::Left),
             (XINPUT_GAMEPAD_DPAD_RIGHT.0, Input::Right),
@@ -269,7 +289,10 @@ unsafe fn sdl_worker(
                     (1, 0x2000),
                     (2, 0x4000),
                     (3, 0x8000),
+                    (4, 0x20),
                     (6, 0x10),
+                    (7, 0x40),
+                    (8, 0x80),
                     (9, 0x100),
                     (10, 0x200),
                     (11, 1),
@@ -282,6 +305,12 @@ unsafe fn sdl_worker(
                     }
                 }
                 let (x, y) = (axis(p, 0), axis(p, 1));
+                if axis(p, 4) > 4000 {
+                    bits |= 0x400;
+                }
+                if axis(p, 5) > 4000 {
+                    bits |= 0x800;
+                }
                 if x > 18000 {
                     bits |= 8;
                 }
@@ -325,6 +354,22 @@ unsafe fn sdl_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_button_must_be_released_before_confirming() {
+        let mut c = Controller::new();
+        c.require_release();
+        let n = Instant::now();
+        assert!(c.process(XINPUT_GAMEPAD_A.0, n).is_empty());
+        assert!(
+            c.process(XINPUT_GAMEPAD_A.0, n + Duration::from_secs(1))
+                .is_empty()
+        );
+        assert!(c.process(0, n + Duration::from_secs(2)).is_empty());
+        assert_eq!(
+            c.process(XINPUT_GAMEPAD_A.0, n + Duration::from_secs(3)),
+            vec![Input::Accept]
+        );
+    }
     #[test]
     fn held_accept_never_launches_twice() {
         let mut c = Controller::new();

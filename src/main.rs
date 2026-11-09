@@ -218,7 +218,7 @@ impl Launcher {
             ),
             menu: false,
             menu_index: 0,
-            details: false,
+            details: args.iter().any(|a| a == "--resume-details"),
             details_action: 0,
             watching_video: false,
             trailer_audio: None,
@@ -261,6 +261,14 @@ impl Launcher {
                 launcher.platform = index;
                 launcher.platform_motion = motion::Tween::new(index as f32, start);
             }
+        }
+        if let Some(id) = args.iter().position(|a| a == "--resume-game").and_then(|i| args.get(i + 1)) {
+            if let Some(index) = launcher.library.games.iter().position(|g| &g.id == id) {
+                launcher.selected = index;
+            }
+        }
+        if launcher.session.is_some() {
+            launcher.controller.require_release();
         }
         if launcher.preview {
             launcher.config.music = false;
@@ -410,6 +418,7 @@ impl Launcher {
                 plan: game.launch,
                 name: game.name,
                 platform: self.platforms[self.platform].clone(),
+                game_id: game.id,
                 hwnd: focus::hwnd(window).map_or(0, |h| h.0 as usize as u64),
             };
             if let Err(error) = session::Client::send(&message) {
@@ -872,8 +881,9 @@ impl Launcher {
                         log(&self.base, "game_started", "", self.start);
                         cx.notify();
                     }
-                    launch::LaunchEvent::Ended => {
+                    launch::LaunchEvent::Ended | launch::LaunchEvent::WindowClosed => {
                         self.phase = Phase::Library;
+                        self.details = true;
                         finished = true;
                         log(&self.base, "game_ended", "", self.start);
                         focus::restore(window);
