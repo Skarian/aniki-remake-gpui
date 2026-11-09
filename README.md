@@ -62,11 +62,14 @@ Trailers use bounded FFmpeg decoding at up to 1080p/30 fps. The default is two d
 
 - `build.ps1 -Test`: Rust tests for launch resolution, process tracking, input, cache ownership, and motion.
 - `python tests/retained_lifecycle.py`: real-window tests proving the launcher PID and HWND survive two game cycles each with Xbox and virtual DualShock 4 input; also covers lingering processes, explicit restore, duplicate invocation, missing executables, owner crashes, and normal exit. Builds its own WinForms fixture and needs no game library.
+- Add `--artwork-from-cache` to exercise that lifecycle with real local background, logo, and cover images from the existing cache. The test reads those files without changing the library.
 - `tests/selection_flow.py`: full preview navigation, Details actions, menu restrictions, and video with virtual Xbox / DualShock 4 controllers. See the script's startup instructions.
 
 Controller integration tests require Python's `vgamepad` package and an existing ViGEm driver. They do not install drivers. Tests create isolated copies under `artifacts`; do not run interactive tests while using another controller application.
 
 `--trace-motion` and `--trace-memory` write local diagnostics under `artifacts`. Render callbacks are not physical display scanout or Apollo delivery.
+
+Rust panics in GUI builds are recorded in `artifacts/panic.log` with their source location and a backtrace, even when no terminal is attached.
 
 For visual inspection without launching games, use `--preview-screen home|details|menu|launching|running|error|empty|empty-library|loading` with optional `--preview-input keyboard|xbox|playstation`. Preview mode does not edit configuration or refresh the library.
 

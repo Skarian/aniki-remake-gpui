@@ -363,7 +363,7 @@ impl Launcher {
         }
         cx.notify();
     }
-    fn launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn launch(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.preview {
             self.details = false;
             self.phase = Phase::Launching;
@@ -410,7 +410,8 @@ impl Launcher {
         log(&self.base, "launch_requested", &game.name, self.start);
         // Dispatch is queued by the status render, after its artwork resolves.
         // The next frame callback then runs after that scene was presented.
-        window.request_animation_frame();
+        // Input handlers have no GPUI rendered-view stack. notify schedules
+        // the status render; request_animation_frame is only legal in render.
         cx.notify();
     }
     fn guard_return_input(&mut self) {
@@ -1802,6 +1803,24 @@ fn base_dir() -> PathBuf {
     std::env::current_dir().unwrap()
 }
 fn main() {
+    // GUI-subsystem builds have no stderr console. Keep failures diagnosable.
+    std::panic::set_hook(Box::new(|info| {
+        let base = base_dir();
+        let _ = fs::create_dir_all(base.join("artifacts"));
+        use std::io::Write;
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(base.join("artifacts/panic.log"))
+        {
+            let _ = writeln!(
+                file,
+                "pid={} {info}\n{}",
+                std::process::id(),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+    }));
     let start = Instant::now();
     let _ = PROCESS_OFFSET.set(process_age_ms());
     let base = base_dir();

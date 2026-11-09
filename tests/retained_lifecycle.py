@@ -46,6 +46,8 @@ def wait(predicate,timeout=20):
     while time.monotonic()<end:
         rows=events()
         if predicate(rows): return rows
+        if owner is not None and owner.poll() is not None:
+            raise AssertionError(f'Launcher exited unexpectedly: {owner.returncode}; last events: {rows[-5:]}')
         time.sleep(.05)
     raise AssertionError('Timed out: '+str(events()[-3:]))
 
@@ -54,12 +56,18 @@ def page(rows):
     return frames[-1]['page'] if frames else None
 
 results=[]
+artwork={}
+if '--artwork-from-cache' in sys.argv:
+    cached=json.loads((root/'cache/library.json').read_text(encoding='utf-8-sig'))
+    source=next(g for g in cached['games'] if all(g.get(k) and Path(g[k]).is_file() for k in ('background','logo','cover')))
+    artwork={k:source[k] for k in ('background','logo','cover')}
 for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]:
     if log.exists(): log.rename(app/'artifacts'/f'session-{time.time_ns()}.jsonl')
     marker=app/f'{family}-{mode}.hwnd'
     marker.unlink(missing_ok=True); Path(str(marker)+'.transition').unlink(missing_ok=True)
     fixture_mode='exit' if mode.startswith('held-') else mode
     game=dict(id='fixture',name='Lifecycle fixture',platform='PC',launch=dict(kind='process',executable=str(app/'WindowFixture.exe'),arguments=f'{fixture_mode} "{marker}"',working_dir=str(app),install_dir=str(app)))
+    game.update(artwork)
     if mode=='missing': game['launch']['executable']=str(app/'MissingGame.exe')
     library=dict(games=[game],exported_utc='',platform_art={})
     def save(): (app/'cache/library.json').write_text(json.dumps(library))
@@ -71,13 +79,19 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox',
         else: pad.press_button(button=buttons[action])
         pad.update();time.sleep(hold);pad.reset();pad.update();time.sleep(.35)
     owner=None; followers=[]; handle=None
+    output=open(app/'artifacts'/f'stderr-{family}-{mode}.log','wb')
     try:
-        owner=subprocess.Popen([str(app/'aniki-remake-gpui.exe'),'--trace-motion','--trace-memory'],cwd=app)
+        owner=subprocess.Popen([str(app/'aniki-remake-gpui.exe'),'--trace-motion','--trace-memory'],cwd=app,stdout=output,stderr=subprocess.STDOUT)
         wait(lambda r:any(e['event']=='startup_focus' for e in r))
         own=[w for w in windows() if w[1]==owner.pid]
         assert len(own)==1,own
         hwnd=own[0][0]
         wait(lambda _:u.GetForegroundWindow()==hwnd)
+        expected_kind='PlayStation' if family=='ps' else 'Xbox'
+        wait(lambda r:any(e['event']=='controller' and f'connected=true;kind={expected_kind}' in e['detail'] for e in r))
+        # Enumeration is asynchronous; the app must observe a neutral sample
+        # before this test intentionally presses its first button.
+        pad.reset();pad.update();time.sleep(.2)
         assert not any(w[2]=='AnikiSessionBlack' for w in windows())
         if mode=='crash':
             follower=subprocess.Popen([str(app/'aniki-remake-gpui.exe')],cwd=app);followers.append(follower)
@@ -157,5 +171,6 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox',
         if owner and owner.poll() is None:owner.terminate();owner.wait(timeout=5)
         for f in followers:
             if f.poll() is None:f.terminate();f.wait(timeout=5)
+        output.close()
         time.sleep(.5)
         (app.parent/'results.json').write_text(json.dumps(results,indent=2))
