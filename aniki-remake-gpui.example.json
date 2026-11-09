@@ -1,0 +1,10 @@
+{
+  "playnite_root": "D:\\Playnite",
+  "fullscreen": true,
+  "music": true,
+  "video": true,
+  "music_volume": 0.25,
+  "video_delay_ms": 1500,
+  "ffmpeg": "",
+  "video_threads": 2
+}
