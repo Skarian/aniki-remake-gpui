@@ -1,29 +1,23 @@
 use crate::library::LaunchPlan;
-use std::os::windows::process::CommandExt;
 use std::{
     collections::HashSet,
     path::Path,
-    process::{Child, Command},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc::Sender,
-    },
+    sync::mpsc::Sender,
     time::{Duration, Instant},
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HWND, LPARAM},
+        Foundation::{CloseHandle, HANDLE, HWND},
         System::{Diagnostics::ToolHelp::*, Registry::*, Threading::*},
         UI::{
-            Shell::ShellExecuteW,
-            WindowsAndMessaging::{
-                EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible,
-                SW_SHOWNORMAL,
+            Shell::{
+                SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+                ShellExecuteExW, ShellExecuteW,
             },
+            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SW_SHOWNORMAL},
         },
     },
-    core::{BOOL, PCWSTR, PWSTR, w},
+    core::{PCWSTR, PWSTR, w},
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -31,7 +25,6 @@ pub enum LaunchEvent {
     Started,
     Focused(u64),
     Ended,
-    WindowClosed,
     Failed(String),
 }
 #[derive(Clone, Debug)]
@@ -96,9 +89,64 @@ pub fn descendants(live: &[Process], tracked: &mut HashSet<u32>) {
             break;
         }
     }
+    // Like Playnite's MonitorProcessTree, retain only the current generation.
+    // Keeping dead parents forever can adopt unrelated processes after PID reuse.
+    tracked.retain(|pid| live.iter().any(|p| p.pid == *pid));
+}
+fn matches_game(
+    p: &Process,
+    tracked: &HashSet<u32>,
+    baseline: &HashSet<u32>,
+    steam: bool,
+    install: &str,
+) -> bool {
+    tracked.contains(&p.pid)
+        || (steam
+            && !baseline.contains(&p.pid)
+            && install.len() > 3
+            && p.path.to_lowercase().starts_with(install))
 }
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
+}
+struct StartedProcess(HANDLE);
+impl Drop for StartedProcess {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+// Playnite ProcessStarter.StartProcess uses ProcessStartInfo's shell-execute
+// default. Use the same Windows launch facility, keeping its process handle.
+// Game processes do not inherit launcher diagnostic/automation pipe handles.
+fn start_process(plan: &LaunchPlan) -> windows::core::Result<StartedProcess> {
+    let executable = wide(&plan.executable);
+    let arguments = wide(&plan.arguments);
+    let directory = if plan.working_dir.is_empty() {
+        Path::new(&plan.executable)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        plan.working_dir.clone()
+    };
+    let directory = wide(&directory);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(executable.as_ptr()),
+        lpParameters: PCWSTR(arguments.as_ptr()),
+        lpDirectory: PCWSTR(directory.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    unsafe {
+        ShellExecuteExW(&mut info)?;
+    }
+    Ok(StartedProcess(info.hProcess))
 }
 fn steam_running(app: &str) -> bool {
     unsafe {
@@ -118,50 +166,7 @@ fn steam_running(app: &str) -> bool {
             && value != 0
     }
 }
-// A lingering emulator process is not a playable session once all its windows
-// have gone. Minimized windows remain visible to Win32 and do not trigger this.
-#[derive(Default)]
-struct WindowLiveness {
-    missing_since: Option<Instant>,
-}
-impl WindowLiveness {
-    fn ended(&mut self, focused: bool, visible: bool, now: Instant) -> bool {
-        if !focused || visible {
-            self.missing_since = None;
-            return false;
-        }
-        now.duration_since(*self.missing_since.get_or_insert(now)) >= Duration::from_secs(2)
-    }
-}
-fn has_game_window(pids: &HashSet<u32>) -> bool {
-    struct Search<'a> {
-        pids: &'a HashSet<u32>,
-        found: bool,
-    }
-    unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> BOOL {
-        let search = unsafe { &mut *(param.0 as *mut Search<'_>) };
-        let mut pid = 0;
-        unsafe {
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        }
-        if search.pids.contains(&pid) && unsafe { IsWindowVisible(hwnd).as_bool() } {
-            search.found = true;
-            return BOOL(0);
-        }
-        BOOL(1)
-    }
-    let mut search = Search { pids, found: false };
-    unsafe {
-        let _ = EnumWindows(
-            Some(visit),
-            LPARAM((&mut search as *mut Search<'_>) as isize),
-        );
-    }
-    search.found
-}
-pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) -> Arc<AtomicBool> {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let stopped = cancel.clone();
+pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
     std::thread::spawn(move || {
         let fail = |message: String| {
             let _ = tx.send(LaunchEvent::Failed(message));
@@ -173,7 +178,7 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) -> Arc<AtomicBool> {
         let before = processes();
         let baseline: HashSet<u32> = before.iter().map(|p| p.pid).collect();
         let mut tracked = HashSet::new();
-        let mut child: Option<Child> = None;
+        let mut _child: Option<StartedProcess> = None;
         if plan.kind == "steam" {
             let url = wide(&format!("steam://rungameid/{}", plan.steam_id));
             let result = unsafe {
@@ -202,15 +207,10 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) -> Arc<AtomicBool> {
                 fail("This emulator or game is already running. Close it before starting another session.".into());
                 return;
             }
-            let mut command = Command::new(&plan.executable);
-            command.raw_arg(&plan.arguments);
-            if !plan.working_dir.is_empty() {
-                command.current_dir(&plan.working_dir);
-            }
-            match command.spawn() {
+            match start_process(&plan) {
                 Ok(c) => {
-                    tracked.insert(c.id());
-                    child = Some(c)
+                    tracked.insert(unsafe { GetProcessId(c.0) });
+                    _child = Some(c)
                 }
                 Err(e) => {
                     fail(e.to_string());
@@ -225,7 +225,6 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) -> Arc<AtomicBool> {
         let mut started = false;
         let mut focused = false;
         let mut gone = 0u8;
-        let mut windows = WindowLiveness::default();
         let install = plan
             .install_dir
             .trim_end_matches(['\\', '/'])
@@ -233,19 +232,11 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) -> Arc<AtomicBool> {
             + "\\";
         loop {
             std::thread::sleep(Duration::from_millis(350));
-            if stopped.load(Ordering::Relaxed) {
-                break;
-            }
             let live = processes();
             descendants(&live, &mut tracked);
             let game_pids: HashSet<u32> = live
                 .iter()
-                .filter(|p| {
-                    tracked.contains(&p.pid)
-                        || (!baseline.contains(&p.pid)
-                            && install.len() > 3
-                            && p.path.to_lowercase().starts_with(&install))
-                })
+                .filter(|p| matches_game(p, &tracked, &baseline, plan.kind == "steam", &install))
                 .map(|p| p.pid)
                 .collect();
             let matched = !game_pids.is_empty();
@@ -256,7 +247,7 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) -> Arc<AtomicBool> {
                     started = true;
                     let _ = tx.send(LaunchEvent::Started);
                 }
-                // Only retire the frontend after a tracked game's actual
+                // Only minimize the launcher after a tracked game's actual
                 // foreground window appears, never just on process creation.
                 if !focused {
                     let foreground = unsafe { GetForegroundWindow() };
@@ -279,33 +270,47 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) -> Arc<AtomicBool> {
                 fail("The game did not start within 90 seconds. Return to the library and try again.".into());
                 break;
             }
-            if windows.ended(focused, has_game_window(&game_pids), Instant::now()) {
-                let _ = tx.send(LaunchEvent::WindowClosed);
-                break;
-            }
-            if let Some(c) = child.as_mut() {
-                let _ = c.try_wait();
-            }
         }
     });
-    cancel
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn window_return_requires_focus_and_continuous_absence() {
-        let n = Instant::now();
-        let mut state = WindowLiveness::default();
-        assert!(!state.ended(false, false, n));
-        assert!(!state.ended(false, false, n + Duration::from_secs(30)));
-        assert!(!state.ended(true, false, n + Duration::from_secs(31)));
-        assert!(!state.ended(true, false, n + Duration::from_secs(32)));
-        // A replacement or minimized window resets the grace period.
-        assert!(!state.ended(true, true, n + Duration::from_secs(33)));
-        assert!(!state.ended(true, false, n + Duration::from_secs(34)));
-        assert!(state.ended(true, false, n + Duration::from_secs(36)));
+    fn direct_launch_tracks_tree_not_unrelated_files_in_its_folder() {
+        let p = Process {
+            pid: 11,
+            parent: 9,
+            path: "c:\\games\\other.exe".into(),
+        };
+        let tracked = HashSet::from([10]);
+        let baseline = HashSet::new();
+        assert!(!matches_game(&p, &tracked, &baseline, false, "c:\\games\\"));
+        assert!(matches_game(&p, &tracked, &baseline, true, "c:\\games\\"));
+        assert!(!matches_game(
+            &p,
+            &tracked,
+            &HashSet::from([11]),
+            true,
+            "c:\\games\\"
+        ));
+        assert!(!matches_game(&p, &tracked, &baseline, true, "c:\\game\\"));
+    }
+    #[test]
+    fn exited_ids_cannot_adopt_a_later_unrelated_process() {
+        let mut tracked = HashSet::from([10]);
+        descendants(&[], &mut tracked);
+        assert!(tracked.is_empty());
+        descendants(
+            &[Process {
+                pid: 11,
+                parent: 10,
+                path: "unrelated".into(),
+            }],
+            &mut tracked,
+        );
+        assert!(tracked.is_empty());
     }
     #[test]
     fn tracks_descendants_after_parent_exits() {

@@ -1,4 +1,4 @@
-﻿# aniki-remake-gpui
+# aniki-remake-gpui
 
 A minimal Windows fullscreen launcher built with Rust and GPUI. It reads a Playnite library and its existing artwork, logos, trailers, music, and platform images. Playnite does not have to remain open.
 
@@ -42,17 +42,17 @@ Set Apollo's command to the full path of `aniki-remake-gpui.exe` and its working
 
 ## Game lifecycle
 
-One binary runs a small native session host and a GPUI frontend. Once a tracked game actually owns the foreground window, the frontend exits and releases its renderer, artwork, video, audio, and controller resources. The host retains a black window behind the game.
+The launcher keeps one GPUI window alive. It releases topmost status before launch, waits for the tracked game to own foreground focus, then minimizes. Music, video decoding, and artwork are released; the Windows renderer reduces its surfaces while minimized.
 
-After game exit, the frontend prepares artwork under black, restores that game's Details page and collection, then fades in over 360 ms. Three inactive process samples debounce process handoffs. If the game previously took focus but has no visible windows for two seconds, the launcher also returns: an emulator can leave its process alive after closing its window. A minimized window still counts as present.
+When the tracked process tree exits, the **same window** returns to the preserved Details page, game, collection, and scroll position. There is no black-cover window, replacement frontend, or return fade from black. Windows zoom animations are disabled for the launcher. A second invocation activates the existing window rather than creating a competing fullscreen interface.
 
-When the black cover has focus, a keyboard, mouse, or controller button brings the launcher back without terminating the game. The recovery input must be released before it can activate an action in the restored UI. Controller recovery initializes only while the cover has focus; the host does not process gameplay input.
+An emulator that has closed its window but still has a live process is still running, as in Playnite. Opening the launcher again restores its existing window; Back returns from the running-game screen to the library without killing the game or discarding tracking. Starting another game is blocked until that tracked session finishes.
 
-Repeated invocations from the same executable path share one session. A repeat launch focuses the browsing UI and does not open another UI over gameplay. The extra invocation waits for the original session to end, preserving external launcher lifetime tracking.
+See [Playnite alignment](docs/playnite-alignment.md) for the source comparison and intentional differences.
 
 ## Compatibility and limits
 
-Steam launches use the registered `steam://rungameid/` handler. Direct executable and emulator launches resolve Playnite profiles and Windows arguments. Tracking follows process descendants and new processes under the game's installation directory, with Steam's running state as an additional signal.
+Steam launches use the registered `steam://rungameid/` handler. Direct executable and emulator launches resolve Playnite profiles and Windows arguments. Direct launches use Windows shell execution and track the launched process tree. Steam uses newly started processes under the game installation directory and Steam's running-app state.
 
 This is not full Playnite compatibility. Non-Steam store integrations, launch scripts, multi-action / multi-ROM selection, advanced custom tracking, library editing, achievements, downloads, and playtime writeback are not implemented. Unsupported actions produce an error. An emulator left running after its window closes may need to finish exiting or be closed before another instance can start; the launcher does not force-kill it.
 
@@ -60,15 +60,13 @@ Trailers use bounded FFmpeg decoding at up to 1080p/30 fps. The default is two d
 
 ## Verification
 
-- `build.ps1 -Test`: Rust tests for launch resolution, tracking, input, cache ownership, and motion.
-- `python -m unittest discover -s tests -p test_session_trace.py`: fade-checker tests.
-- `python tests/session_lifecycle.py`: standalone launch, duplicate invocation, return, failure, and crash cleanup.
-- `python tests/session_recovery.py`: real-window tests for lingering processes, replacement windows, minimized games, and Xbox / virtual DualShock 4 recovery. Builds its own WinForms fixture; needs no game library.
-- `python tests/session_recovery.py keyboard`: the minimized-window case, waiting for keyboard input on the exposed cover.
+- `build.ps1 -Test`: Rust tests for launch resolution, process tracking, input, cache ownership, and motion.
+- `python tests/retained_lifecycle.py`: real-window tests proving the launcher PID and HWND survive two game cycles each with Xbox and virtual DualShock 4 input; also covers lingering processes, explicit restore, duplicate invocation, missing executables, owner crashes, and normal exit. Builds its own WinForms fixture and needs no game library.
+- `tests/selection_flow.py`: full preview navigation, Details actions, menu restrictions, and video with virtual Xbox / DualShock 4 controllers. See the script's startup instructions.
 
 Controller integration tests require Python's `vgamepad` package and an existing ViGEm driver. They do not install drivers. Tests create isolated copies under `artifacts`; do not run interactive tests while using another controller application.
 
-`--trace-motion` and `--trace-memory` write local diagnostics under `artifacts`. Fade traces check focus, progress, completion, and render cadence. An occluded Windows compositor cannot establish visible smoothness; the trace reports that limit separately. Render callbacks are not physical display scanout or Apollo delivery.
+`--trace-motion` and `--trace-memory` write local diagnostics under `artifacts`. Render callbacks are not physical display scanout or Apollo delivery.
 
 For visual inspection without launching games, use `--preview-screen home|details|menu|launching|running|error|empty|empty-library|loading` with optional `--preview-input keyboard|xbox|playstation`. Preview mode does not edit configuration or refresh the library.
 

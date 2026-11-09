@@ -300,15 +300,7 @@ impl ArtworkCache {
         }
         changed
     }
-    pub fn settled(&self) -> bool {
-        self.flights.is_empty()
-            && self.queue.is_empty()
-            && self
-                .entries
-                .values()
-                .filter(|e| e.used == self.epoch)
-                .all(|e| e.result.is_some())
-    }
+
     pub fn stats(&self) -> Stats {
         let decoded_bytes = self.entries.values().map(|e| e.bytes).sum();
         let pinned_bytes: usize = self

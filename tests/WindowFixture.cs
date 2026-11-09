@@ -17,7 +17,8 @@ class WindowFixture {
         var timer = new Timer { Interval = 5000 };
         timer.Tick += (s,e) => {
             timer.Stop();
-            if(mode == "minimize") form.WindowState = FormWindowState.Minimized;
+            if(mode == "exit") { form.Close(); Application.Exit(); }
+            else if(mode == "minimize") form.WindowState = FormWindowState.Minimized;
             else if(mode == "replace") {
                 form.Hide();
                 var replacement = new Timer { Interval = 700 };

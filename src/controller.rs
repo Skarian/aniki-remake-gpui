@@ -140,9 +140,6 @@ impl Controller {
     pub fn require_release(&mut self) {
         self.require_neutral = true;
     }
-    pub fn any_pressed(&self) -> bool {
-        self.previous != 0
-    }
     fn process(&mut self, buttons: u16, now: Instant) -> Vec<Input> {
         if self.require_neutral {
             self.require_neutral = buttons != 0;

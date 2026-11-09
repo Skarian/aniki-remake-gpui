@@ -2,12 +2,12 @@
 mod artwork;
 mod controller;
 mod focus;
+mod instance;
 mod launch;
 mod library;
 mod media;
 mod motion;
 mod screens;
-mod session;
 use controller::{Controller, Input, Kind};
 use gpui::{prelude::*, *};
 use library::{Config, Game, Library, Update};
@@ -99,11 +99,7 @@ struct Launcher {
     phase: Phase,
     launch_rx: Option<Receiver<launch::LaunchEvent>>,
     game_minimized: bool,
-    session: Option<session::Client>,
-    session_ready: bool,
-    session_revealed: bool,
-    session_visible: bool,
-    session_fade: motion::Tween,
+    instance: Option<instance::Instance>,
     menu: bool,
     menu_index: usize,
     details: bool,
@@ -145,6 +141,7 @@ impl Launcher {
         cx: &mut Context<Self>,
         start: Instant,
         fixture: bool,
+        instance: Option<instance::Instance>,
         refresh_paused: Arc<AtomicBool>,
     ) -> Self {
         let focus = cx.focus_handle();
@@ -201,24 +198,10 @@ impl Launcher {
             phase: Phase::Library,
             launch_rx: None,
             game_minimized: false,
-            session: args
-                .iter()
-                .any(|a| a == "--session-ui")
-                .then(session::Client::new),
-            session_ready: false,
-            session_revealed: false,
-            session_visible: false,
-            session_fade: motion::Tween::new(
-                if args.iter().any(|a| a == "--session-ui") {
-                    0.
-                } else {
-                    1.
-                },
-                start,
-            ),
+            instance,
             menu: false,
             menu_index: 0,
-            details: args.iter().any(|a| a == "--resume-details"),
+            details: false,
             details_action: 0,
             watching_video: false,
             trailer_audio: None,
@@ -252,24 +235,7 @@ impl Launcher {
             motion_was_active: false,
             menu_motion: motion::Tween::new(0., start),
         };
-        if let Some(platform) = args
-            .iter()
-            .position(|a| a == "--resume-platform")
-            .and_then(|i| args.get(i + 1))
-        {
-            if let Some(index) = launcher.platforms.iter().position(|p| p == platform) {
-                launcher.platform = index;
-                launcher.platform_motion = motion::Tween::new(index as f32, start);
-            }
-        }
-        if let Some(id) = args.iter().position(|a| a == "--resume-game").and_then(|i| args.get(i + 1)) {
-            if let Some(index) = launcher.library.games.iter().position(|g| &g.id == id) {
-                launcher.selected = index;
-            }
-        }
-        if launcher.session.is_some() {
-            launcher.controller.require_release();
-        }
+        launcher.controller.require_release();
         if launcher.preview {
             launcher.config.music = false;
             launcher.config.video = false;
@@ -388,7 +354,13 @@ impl Launcher {
             cx.notify();
             return;
         }
-        if self.launch_rx.is_some() || self.visible().is_empty() {
+        if self.launch_rx.is_some() {
+            self.phase =
+                Phase::Failed("A game is still running. Close it before starting another.".into());
+            cx.notify();
+            return;
+        }
+        if self.visible().is_empty() {
             return;
         }
         let Some(game) = self.game().cloned() else {
@@ -400,7 +372,6 @@ impl Launcher {
             return;
         }
         self.reset_media();
-        self.details = false;
         self.phase = Phase::Launching;
         let (tx, rx) = mpsc::channel();
         self.launch_rx = Some(rx);
@@ -413,33 +384,11 @@ impl Launcher {
             self.start,
         );
         log(&self.base, "launch_requested", &game.name, self.start);
-        if self.session.is_some() {
-            let message = session::UiMessage::Launch {
-                plan: game.launch,
-                name: game.name,
-                platform: self.platforms[self.platform].clone(),
-                game_id: game.id,
-                hwnd: focus::hwnd(window).map_or(0, |h| h.0 as usize as u64),
-            };
-            if let Err(error) = session::Client::send(&message) {
-                let _ = tx.send(launch::LaunchEvent::Failed(format!(
-                    "Session host disconnected: {error}"
-                )));
-            }
-        } else {
-            launch::start(game.launch, tx);
-        }
+        launch::start(game.launch, tx);
         cx.notify();
     }
     fn input(&mut self, input: Input, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_some() && !self.session_visible {
-            return;
-        }
         log(&self.base, "input", &format!("{input:?}"), self.start);
-        // Only the tracked process-exit event resumes the library during a game.
-        if self.phase == Phase::Running && self.launch_rx.is_some() {
-            return;
-        }
         if self.watching_video {
             if input == Input::Back || input == Input::Video {
                 self.watching_video = false;
@@ -628,46 +577,19 @@ impl Launcher {
     }
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let now = Instant::now();
-        let messages: Vec<_> = self
-            .session
+        if self
+            .instance
             .as_ref()
-            .map(|s| s.events.try_iter().collect())
-            .unwrap_or_default();
-        let mut remote_events = Vec::new();
-        for message in messages {
-            match message {
-                session::HostMessage::Shutdown => {
-                    self.reset_media();
-                    log(&self.base, "ui_suspended", "", self.start);
-                    cx.quit();
-                    return;
-                }
-                session::HostMessage::Reveal => {
-                    self.session_revealed = true;
-                    self.session_fade.to(1., 360, now);
-                    if self.trace_motion {
-                        // The focus call can block. Record the actual tween
-                        // origin, not the later foreground-confirmation time.
-                        log(&self.base, "session_fade_started",
-                            &format!("{:.6}", now.duration_since(self.start).as_secs_f64()*1000.), self.start);
-                    }
-                    focus::restore(window);
-                    log(
-                        &self.base,
-                        "session_reveal",
-                        &focus::state(window),
-                        self.start,
-                    );
-                    cx.notify();
-                }
-                session::HostMessage::Activate => {
-                    if self.session_visible && self.launch_rx.is_none() {
-                        focus::restore(window);
-                        log(&self.base, "session_activated", &focus::state(window), self.start);
-                    }
-                }
-                session::HostMessage::Game(event) => remote_events.push(event),
-            }
+            .is_some_and(|i| i.activation_requested())
+        {
+            focus::restore(window);
+            log(
+                &self.base,
+                "session_activated",
+                &focus::state(window),
+                self.start,
+            );
+            cx.notify();
         }
         let (artwork_changed, stats, ready_at) = self.artwork.update(cx, |cache, cx| {
             let changed = cache.pump(window, cx);
@@ -682,27 +604,6 @@ impl Launcher {
         });
         if artwork_changed {
             cx.notify();
-        }
-        if self.session.is_some()
-            && !self.session_ready
-            && self.first_render
-            && !self.background_pending
-            && self.artwork.read(cx).settled()
-        {
-            self.session_ready = true;
-            // Leave the native black cover in place until the completed scene
-            // has passed through a frame. The UI itself is also opaque black.
-            window.on_next_frame(|window, _| {
-                let _ = session::Client::send(&session::UiMessage::Ready {
-                    hwnd: focus::hwnd(window).map_or(0, |h| h.0 as usize as u64),
-                });
-            });
-            cx.notify();
-        }
-        if self.session_revealed && !self.session_visible && !self.session_fade.active(now) {
-            self.session_visible = true;
-            let _ = session::Client::send(&session::UiMessage::Visible);
-            log(&self.base, "session_fade_complete", "", self.start);
         }
         if let Some(stats) = stats {
             log(&self.base, "artwork_memory", &stats, self.start);
@@ -720,8 +621,7 @@ impl Launcher {
                 );
             }
         }
-        let motion_active = self.session_fade.active(now)
-            || self.rail.active(now)
+        let motion_active = self.rail.active(now)
             || self.platform_motion.active(now)
             || self.background_motion.active(now)
             || self.video_motion.active(now)
@@ -754,7 +654,7 @@ impl Launcher {
         }
         if !self.foreground_checked && self.start.elapsed() > Duration::from_millis(500) {
             self.foreground_checked = true;
-            if self.launch_rx.is_none() && (self.session.is_none() || self.session_revealed) {
+            if self.launch_rx.is_none() {
                 focus::restore(window);
             }
             log(
@@ -856,15 +756,19 @@ impl Launcher {
         }
         let mut finished = false;
         {
-            let events: Vec<_> = self
-                .launch_rx
-                .iter()
-                .flat_map(|rx| rx.try_iter())
-                .chain(remote_events)
-                .collect();
+            let events: Vec<_> = self.launch_rx.iter().flat_map(|rx| rx.try_iter()).collect();
             for event in events {
                 match event {
-                    launch::LaunchEvent::Focused(_) => {}
+                    launch::LaunchEvent::Focused(_) => {
+                        window.minimize_window();
+                        self.game_minimized = true;
+                        log(
+                            &self.base,
+                            "game_minimized",
+                            "tracked game has foreground",
+                            self.start,
+                        );
+                    }
                     launch::LaunchEvent::Started => {
                         self.phase = Phase::Running;
                         self.reset_media();
@@ -881,9 +785,10 @@ impl Launcher {
                         log(&self.base, "game_started", "", self.start);
                         cx.notify();
                     }
-                    launch::LaunchEvent::Ended | launch::LaunchEvent::WindowClosed => {
+                    launch::LaunchEvent::Ended => {
                         self.phase = Phase::Library;
-                        self.details = true;
+                        self.last_page = if self.details { "details" } else { "home" };
+                        self.page_motion = motion::Tween::new(1., now);
                         finished = true;
                         log(&self.base, "game_ended", "", self.start);
                         focus::restore(window);
@@ -912,16 +817,10 @@ impl Launcher {
             self.reset_media();
             window.focus(&self.focus);
         }
-        // Process creation precedes the game's first window. Keep the loading
-        // surface visible until focus transfers, then release renderer surfaces.
-        if self.session.is_none() && self.phase == Phase::Running && self.launch_rx.is_some() {
-            if window.is_window_active() {
-                self.game_minimized = false;
-            } else if !self.game_minimized {
-                self.game_minimized = true;
-                window.minimize_window();
-                log(&self.base, "game_minimized", "", self.start);
-            }
+        // The same window stays alive. Explicitly returning to it must not
+        // cause another automatic minimize or cancel process tracking.
+        if self.game_minimized && window.is_window_active() {
+            self.game_minimized = false;
         }
         let was_connected = self.controller.connected;
         let was_kind = self.controller.kind;
@@ -975,7 +874,6 @@ impl Launcher {
             && !self.visible().is_empty()
             && self.launch_rx.is_none()
             && window.is_window_active()
-            && (self.session.is_none() || self.session_visible)
         {
             if !self.music_started && self.changed_at.elapsed() > Duration::from_millis(450) {
                 self.music_started = true;
@@ -1144,19 +1042,7 @@ impl Launcher {
                 .relative()
                 .overflow_hidden()
                 .bg(rgb(0x080d14))
-                .child(scene.opacity(progress))
-                .when(
-                    self.session.is_some() && self.session_fade.smooth_value(Instant::now()) < 1.,
-                    |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .bg(rgb(0x000000))
-                                .opacity(1. - self.session_fade.smooth_value(Instant::now())),
-                        )
-                    },
-                ),
+                .child(scene.opacity(progress)),
         )
     }
 }
@@ -1167,15 +1053,17 @@ impl Render for Launcher {
             self.first_render = true;
             let base = self.base.clone();
             let start = self.start;
-            let managed = self.session.is_some();
             window.on_next_frame(move |window, _| {
-                if !managed {
-                    focus::restore(window);
-                }
+                focus::restore(window);
                 log(&base, "first_frame_callback", "", start);
             });
             log(&self.base, "first_render", "", self.start);
-            log(&self.base, "gpu", &format!("{:?}", window.gpu_specs()), self.start);
+            log(
+                &self.base,
+                "gpu",
+                &format!("{:?}", window.gpu_specs()),
+                self.start,
+            );
         }
         let bounds = window.viewport_size();
         let w: f32 = bounds.width.into();
@@ -1251,7 +1139,6 @@ impl Render for Launcher {
                 "platform":self.platform_motion.value(now), "platform_target":self.platform,
                 "artwork":self.background_motion.value(now), "video":self.video_motion.value(now),
                 "page":page, "page_progress":self.page_motion.smooth_value(now),
-                "session_fade":self.session_fade.smooth_value(now),
                 "sample_ms":now.duration_since(self.start).as_secs_f64()*1000.,
                 "menu":self.menu, "details_action":self.details_action
             }).to_string(), self.start);
@@ -1259,7 +1146,7 @@ impl Render for Launcher {
         // Follow GPUI's display-frame scheduling for motion, rather than the
         // controller timer (Windows can round a 16 ms timer up to ~32 ms).
         if window.is_window_active()
-            && (self.session_fade.active(now) || self.rail.active(now)
+            && (self.rail.active(now)
                 || self.platform_motion.active(now)
                 || self.background_motion.active(now)
                 || self.video_motion.active(now)
@@ -1730,27 +1617,29 @@ fn main() {
     let _ = fs::create_dir_all(base.join("cache"));
     let _ = fs::create_dir_all(base.join("artifacts"));
     let args: Vec<String> = std::env::args().collect();
-    let managed = args.iter().any(|a| a == "--session-ui");
     let direct = args.iter().any(|a| {
         matches!(
             a.as_str(),
             "--preview-screen" | "--benchmark" | "--fixture-game" | "--import" | "--check-snapshot"
         )
     });
-    if !managed && !direct {
-        if let Err(error) = session::run(&base, &args[1..]) {
-            log(&base, "host_failed", &error.to_string(), start);
-            use windows::{Win32::UI::WindowsAndMessaging::*, core::HSTRING};
-            unsafe {
-                MessageBoxW(
-                    None,
-                    &HSTRING::from(error.to_string()),
-                    &HSTRING::from("aniki-remake-gpui"),
-                    MB_OK | MB_ICONERROR,
-                );
-            }
+    let instance = if !direct {
+        let mut instance = instance::Instance::open().expect("Create application instance guard");
+        if !instance
+            .acquire_or_follow(&base, start)
+            .expect("Open application instance")
+        {
+            return;
         }
-        return;
+        log(&base, "instance_started", "retained_window", start);
+        Some(instance)
+    } else {
+        None
+    };
+    // Set before spawning any workers. Suppress only the shell's window zoom;
+    // the GPUI window itself stays alive across game launches.
+    unsafe {
+        std::env::set_var("ANIKI_DISABLE_WINDOW_ANIMATIONS", "1");
     }
     let config: Config = fs::read(base.join("aniki-remake-gpui.json"))
         .ok()
@@ -1809,7 +1698,7 @@ fn main() {
         let fullscreen = config.fullscreen && !force_windowed;
         cx.open_window(
             WindowOptions {
-                focus: !managed,
+                focus: true,
                 window_bounds: Some(if fullscreen {
                     WindowBounds::Fullscreen(bounds)
                 } else {
@@ -1837,6 +1726,7 @@ fn main() {
                         cx,
                         start,
                         fixture,
+                        instance,
                         refresh_paused,
                     )
                 })
@@ -1849,8 +1739,6 @@ fn main() {
             }
         })
         .detach();
-        if !managed {
-            cx.activate(true);
-        }
+        cx.activate(true);
     });
 }

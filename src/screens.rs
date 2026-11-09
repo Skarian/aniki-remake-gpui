@@ -500,7 +500,7 @@ impl Launcher {
                 }),
         );
         root.when(
-            self.phase != Phase::Library && self.phase != Phase::Running,
+            self.phase != Phase::Library,
             |root| {
                 root.child(
                     div()

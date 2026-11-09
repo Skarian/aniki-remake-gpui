@@ -459,10 +459,9 @@ impl WindowsWindow {
         let hwnd = creation_result?;
 
         register_drag_drop(&this)?;
-        // The session cover masks preparation; suppress the OS opening/closing
-        // transition before this window is first shown. Other GPUI users retain
-        // their default animation behavior.
-        if std::env::var_os("ANIKI_SESSION_FRONTEND").is_some() {
+        // Suppress shell zoom animations for the retained fullscreen launcher
+        // window, before first display. Other GPUI users retain the default.
+        if std::env::var_os("ANIKI_DISABLE_WINDOW_ANIMATIONS").is_some() {
             use windows::Win32::Graphics::Dwm::*;
             let disabled = BOOL(1);
             unsafe {
