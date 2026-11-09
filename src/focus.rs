@@ -30,6 +30,32 @@ pub fn release(window: &Window) {
         }
     }
 }
+/// Never reclaim focus over an unrelated application after a game exits.
+/// A normal game exit exposes our retained window, or briefly the shell.
+pub fn may_restore(window: &Window) -> bool {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let mut class = [0u16; 128];
+        let len = GetClassNameW(foreground, &mut class);
+        return_restore_policy(
+            hwnd(window) == Some(foreground),
+            foreground.0.is_null(),
+            &String::from_utf16_lossy(&class[..len.max(0) as usize]),
+        )
+    }
+}
+fn return_restore_policy(ours: bool, no_window: bool, class: &str) -> bool {
+    ours || no_window || matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd")
+}
+/// Sample action keys on focus regain. Held keys must go neutral before input.
+pub fn action_keys_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    [
+        0x0d, 0x1b, 0x70, 0x09, 0x51, 0x45, 0x4d, 0x56, 0x25, 0x26, 0x27, 0x28,
+    ]
+    .iter()
+    .any(|key| unsafe { GetAsyncKeyState(*key) < 0 })
+}
 pub fn restore(window: &mut Window) {
     if let Some(h) = hwnd(window) {
         unsafe {
@@ -73,4 +99,17 @@ pub fn state(window: &Window) -> String {
             )
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn game_exit_restores_exposed_launcher_but_not_over_other_work() {
+        assert!(return_restore_policy(true, false, "GPUI"));
+        assert!(return_restore_policy(false, true, ""));
+        assert!(return_restore_policy(false, false, "WorkerW"));
+        assert!(!return_restore_policy(false, false, "Chrome_WidgetWin_1"));
+        assert!(!return_restore_policy(false, false, "SDL_app"));
+    }
 }

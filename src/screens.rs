@@ -369,7 +369,17 @@ impl Launcher {
         s: f32,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let loading = self.is_loading();
+        let loading = self.is_loading() || self.phase == Phase::Running;
+        if !game.background.is_empty() {
+            root = root
+                .child(
+                    img(Self::image(&game.background))
+                        .absolute()
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+                .child(div().absolute().size_full().bg(rgba(0x080d14c0)));
+        }
         let elapsed = if loading {
             self.animation_frame as f32 * 0.033
         } else {
@@ -446,7 +456,7 @@ impl Launcher {
                 .items_center()
                 .justify_center()
                 .gap(px(25. * s))
-                .when(self.phase != Phase::Running && !game.logo.is_empty(), |d| {
+                .when(!game.logo.is_empty(), |d| {
                     d.child(
                         div().relative().w(px(380. * s)).h(px(135. * s)).child(
                             img(Self::image(&game.logo))
@@ -499,27 +509,24 @@ impl Launcher {
                     )
                 }),
         );
-        root.when(
-            self.phase != Phase::Library,
-            |root| {
-                root.child(
-                    div()
-                        .absolute()
-                        .left(px(54. * s))
-                        .bottom(px(25. * s))
-                        .h(px(36. * s))
-                        .child(
-                            div()
-                                .id("status-back")
-                                .cursor_pointer()
-                                .child(self.hint(self.prompt("Esc", "B", "○"), "Back", s))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.input(Input::Back, window, cx)
-                                })),
-                        ),
-                )
-            },
-        )
+        root.when(self.phase != Phase::Library, |root| {
+            root.child(
+                div()
+                    .absolute()
+                    .left(px(54. * s))
+                    .bottom(px(25. * s))
+                    .h(px(36. * s))
+                    .child(
+                        div()
+                            .id("status-back")
+                            .cursor_pointer()
+                            .child(self.hint(self.prompt("Esc", "B", "○"), "Back", s))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.input(Input::Back, window, cx)
+                            })),
+                    ),
+            )
+        })
     }
 
     pub(super) fn menu_layer(

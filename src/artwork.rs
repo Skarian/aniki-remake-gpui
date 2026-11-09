@@ -115,22 +115,25 @@ impl ArtworkCache {
             }
         }
     }
-    /// No return cache: release all CPU images and their GPU atlas entries.
-    /// Running decodes finish within the concurrency bound and are discarded.
-    pub fn clear(&mut self, window: &mut Window, cx: &mut App) {
-        for image in self.take_all() {
+    /// Keep only the current game's still artwork while its process runs.
+    pub fn retain_only(&mut self, paths: &HashSet<Resource>, window: &mut Window, cx: &mut App) {
+        for image in self.take_except(paths) {
             cx.drop_image(image, Some(window));
         }
     }
-    fn take_all(&mut self) -> Vec<Arc<RenderImage>> {
+    fn take_except(&mut self, paths: &HashSet<Resource>) -> Vec<Arc<RenderImage>> {
         let mut images = Vec::new();
-        for (_, entry) in self.entries.drain() {
-            if let Some(Ok(image)) = entry.result {
+        self.entries.retain(|path, entry| {
+            if paths.contains(path) {
+                return true;
+            }
+            if let Some(Ok(image)) = entry.result.take() {
                 images.push(image);
                 self.evictions += 1;
             }
-        }
-        self.queue.clear();
+            false
+        });
+        self.queue.retain(|(path, _)| paths.contains(path));
         images
     }
     fn request(&mut self, resource: &Resource) -> Option<Loaded> {
@@ -428,7 +431,7 @@ mod tests {
         drop(image);
         cache.request(&b);
         let id = cache.entries[&b].id;
-        drop(cache.take_all());
+        drop(cache.take_except(&HashSet::new()));
         assert!(weak.upgrade().is_none());
         assert_eq!(cache.stats().decoded_bytes, 0);
         assert_eq!(cache.stats().pinned_bytes, 0);
@@ -444,6 +447,37 @@ mod tests {
         assert!(cache.entries.is_empty());
         cache.request(&a);
         complete(&mut cache, &a); // Return can reload normally.
+    }
+    #[test]
+    fn gameplay_retains_only_return_artwork_and_discards_unrelated_decodes() {
+        let mut cache = ArtworkCache::empty(1024);
+        let keep = HashSet::from([resource("background"), resource("logo"), resource("cover")]);
+        cache.begin_frame();
+        for path in &keep {
+            cache.request(path);
+            complete(&mut cache, path);
+        }
+        let old = resource("old-background");
+        cache.request(&old);
+        let old_image = complete(&mut cache, &old);
+        let weak = Arc::downgrade(&old_image);
+        drop(old_image);
+        let loading = resource("unrelated-loading-cover");
+        cache.request(&loading);
+        let id = cache.entries[&loading].id;
+        drop(cache.take_except(&keep));
+        assert!(weak.upgrade().is_none());
+        assert_eq!(cache.stats().decoded_bytes, 3 * 64);
+        assert_eq!(cache.entries.len(), 3);
+        assert!(keep.iter().all(|p| cache.request(p).is_some()));
+        assert!(!cache.accept(Completion {
+            resource: loading,
+            id,
+            result: Ok(Arc::new(RenderImage::new([image::Frame::new(
+                image::RgbaImage::new(4, 4)
+            )]))),
+        }));
+        assert_eq!(cache.entries.len(), 3);
     }
     #[test]
     fn a_visible_request_can_requeue_after_an_obsolete_queue_item_was_skipped() {

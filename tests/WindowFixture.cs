@@ -17,6 +17,7 @@ class WindowFixture {
         var timer = new Timer { Interval = 5000 };
         timer.Tick += (s,e) => {
             timer.Stop();
+            if(mode == "game-crash") Environment.Exit(7);
             if(mode == "exit") { form.Close(); Application.Exit(); }
             else if(mode == "minimize") form.WindowState = FormWindowState.Minimized;
             else if(mode == "replace") {

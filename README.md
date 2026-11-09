@@ -42,9 +42,9 @@ Set Apollo's command to the full path of `aniki-remake-gpui.exe` and its working
 
 ## Game lifecycle
 
-The launcher keeps one GPUI window alive. It releases topmost status before launch, waits for the tracked game to own foreground focus, then minimizes. Music, video decoding, and artwork are released; the Windows renderer reduces its surfaces while minimized.
+The launcher keeps one fullscreen GPUI window visible. It presents the game's still background, logo, and orbit animation before dispatching launch, then releases topmost status so the game can take foreground. That status screen remains underneath throughout gameplay. Music and video stop; only the game's background, logo, and Details cover remain cached. The animation pauses while the launcher is inactive.
 
-When the tracked process tree exits, the **same window** returns to the preserved Details page, game, collection, and scroll position. There is no black-cover window, replacement frontend, or return fade from black. Windows zoom animations are disabled for the launcher. A second invocation activates the existing window rather than creating a competing fullscreen interface.
+When the tracked process tree exits, the **same window** returns to that game's Details page, collection, and scroll position. B returns Home. Held controller/keyboard input must be released first. If you deliberately browsed elsewhere during gameplay, your navigation is preserved. An unrelated foreground application is not displaced on return. There is no black-cover window, minimization, replacement frontend, or return fade from black. A second invocation activates the existing window rather than creating a competing fullscreen interface.
 
 An emulator that has closed its window but still has a live process is still running, as in Playnite. Opening the launcher again restores its existing window; Back returns from the running-game screen to the library without killing the game or discarding tracking. Starting another game is blocked until that tracked session finishes.
 

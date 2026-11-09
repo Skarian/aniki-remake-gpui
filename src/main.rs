@@ -76,10 +76,19 @@ enum Phase {
     Running,
     Failed(String),
 }
+struct GameSession {
+    game: Game,
+    pending: Option<mpsc::Sender<launch::LaunchEvent>>,
+    frame_queued: bool,
+    requested: Instant,
+    automatic_return: bool,
+    ended: bool,
+}
 struct Launcher {
     base: PathBuf,
     config: Config,
     library: Library,
+    deferred_library: Option<Library>,
     artwork: Entity<artwork::ArtworkCache>,
     trace_memory: bool,
     selected: usize,
@@ -98,7 +107,10 @@ struct Launcher {
     video_started: bool,
     phase: Phase,
     launch_rx: Option<Receiver<launch::LaunchEvent>>,
-    game_minimized: bool,
+    session: Option<GameSession>,
+    launch_generation: u64,
+    was_active: bool,
+    keyboard_release: bool,
     instance: Option<instance::Instance>,
     menu: bool,
     menu_index: usize,
@@ -179,6 +191,7 @@ impl Launcher {
             base,
             config,
             library,
+            deferred_library: None,
             artwork: artwork::ArtworkCache::new(cx),
             trace_memory: args.iter().any(|a| a == "--trace-memory"),
             selected,
@@ -197,7 +210,10 @@ impl Launcher {
             video_started: false,
             phase: Phase::Library,
             launch_rx: None,
-            game_minimized: false,
+            session: None,
+            launch_generation: 0,
+            was_active: false,
+            keyboard_release: false,
             instance,
             menu: false,
             menu_index: 0,
@@ -375,16 +391,66 @@ impl Launcher {
         self.phase = Phase::Launching;
         let (tx, rx) = mpsc::channel();
         self.launch_rx = Some(rx);
+        self.launch_generation += 1;
+        self.session = Some(GameSession {
+            game: game.clone(),
+            pending: Some(tx),
+            frame_queued: false,
+            requested: Instant::now(),
+            automatic_return: true,
+            ended: false,
+        });
+        self.previous_background.clear();
+        self.background_pending = false;
+        self.background_motion = motion::Tween::new(1., Instant::now());
+        if let Some(frame) = self.previous_frame.take() {
+            self.retired.push(frame);
+        }
         self.refresh_paused.store(true, Ordering::Relaxed);
-        focus::release(window);
+        log(&self.base, "launch_requested", &game.name, self.start);
+        // Dispatch is queued by the status render, after its artwork resolves.
+        // The next frame callback then runs after that scene was presented.
+        window.request_animation_frame();
+        cx.notify();
+    }
+    fn guard_return_input(&mut self) {
+        self.controller.require_release();
+        self.keyboard_release = focus::action_keys_down();
+    }
+    fn finish_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(session) = self.session.take() {
+            if session.automatic_return {
+                if let Some(index) = self
+                    .library
+                    .games
+                    .iter()
+                    .position(|g| g.id == session.game.id)
+                {
+                    self.selected = index;
+                    self.details = true;
+                } else {
+                    self.details = false;
+                }
+                self.phase = Phase::Library;
+                self.details_action = 0;
+                self.last_page = if self.details { "details" } else { "home" };
+                self.page_motion = motion::Tween::new(1., Instant::now());
+            }
+        }
+        self.launch_rx = None;
+        self.refresh_paused.store(false, Ordering::Relaxed);
+        self.reset_media();
+        self.guard_return_input();
+        if focus::may_restore(window) {
+            focus::restore(window);
+            window.focus(&self.focus);
+        }
         log(
             &self.base,
-            "focus_released",
+            "return_focus",
             &focus::state(window),
             self.start,
         );
-        log(&self.base, "launch_requested", &game.name, self.start);
-        launch::start(game.launch, tx);
         cx.notify();
     }
     fn input(&mut self, input: Input, window: &mut Window, cx: &mut Context<Self>) {
@@ -428,6 +494,14 @@ impl Launcher {
             if input == Input::Back
                 || matches!(self.phase, Phase::Failed(_)) && input == Input::Accept
             {
+                if self.session.as_ref().is_some_and(|s| s.pending.is_some()) {
+                    // Cancel a launch that has not crossed the presented-frame boundary.
+                    self.session = None;
+                    self.launch_rx = None;
+                    self.refresh_paused.store(false, Ordering::Relaxed);
+                } else if let Some(session) = &mut self.session {
+                    session.automatic_return = false;
+                }
                 self.phase = Phase::Library;
                 self.reset_media();
                 cx.notify();
@@ -576,6 +650,13 @@ impl Launcher {
         }
     }
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.pending.is_some() || s.ended)
+        {
+            cx.notify();
+        }
         let now = Instant::now();
         if self
             .instance
@@ -665,7 +746,10 @@ impl Launcher {
             );
         }
         let animation = self.start.elapsed().as_millis() as u64 / 33;
-        if animation != self.animation_frame && self.is_loading() && window.is_window_active() {
+        if animation != self.animation_frame
+            && (self.is_loading() || self.phase == Phase::Running)
+            && window.is_window_active()
+        {
             self.animation_frame = animation;
             cx.notify();
         }
@@ -693,9 +777,22 @@ impl Launcher {
             cx.quit();
             return;
         }
-        while let Ok(update) = self.rx.try_recv() {
+        let mut updates = Vec::new();
+        if self.launch_rx.is_none() {
+            if let Some(library) = self.deferred_library.take() {
+                updates.push(Update::Library(library));
+            }
+        }
+        updates.extend(self.rx.try_iter());
+        for update in updates {
             match update {
                 Update::Library(library) => {
+                    // An importer already in flight can finish after pause.
+                    // Keep the session's library/artwork stable until return.
+                    if self.launch_rx.is_some() {
+                        self.deferred_library = Some(library);
+                        continue;
+                    }
                     let paths = |lib: &Library| -> std::collections::HashSet<Resource> {
                         lib.games
                             .iter()
@@ -725,9 +822,16 @@ impl Launcher {
                         .unwrap_or(0);
                     self.platform_motion
                         .to(self.platform as f32, 200, Instant::now());
-                    self.selected = selected
-                        .and_then(|id| self.library.games.iter().position(|g| g.id == id))
-                        .unwrap_or(0);
+                    let retained_selection =
+                        selected.and_then(|id| self.library.games.iter().position(|g| g.id == id));
+                    self.selected = retained_selection.unwrap_or(0);
+                    if retained_selection.is_none() {
+                        // A game removed during gameplay must not turn its
+                        // Details page into the first unrelated game's Details.
+                        self.details = false;
+                        self.watching_video = false;
+                        self.reset_media();
+                    }
                     if prior
                         != self
                             .game()
@@ -760,17 +864,17 @@ impl Launcher {
             for event in events {
                 match event {
                     launch::LaunchEvent::Focused(_) => {
-                        window.minimize_window();
-                        self.game_minimized = true;
                         log(
                             &self.base,
-                            "game_minimized",
+                            "game_focused",
                             "tracked game has foreground",
                             self.start,
                         );
                     }
                     launch::LaunchEvent::Started => {
-                        self.phase = Phase::Running;
+                        if self.phase == Phase::Launching {
+                            self.phase = Phase::Running;
+                        }
                         self.reset_media();
                         self.previous_background.clear();
                         self.background_pending = false;
@@ -781,28 +885,33 @@ impl Launcher {
                         for frame in self.retired.drain(..) {
                             cx.drop_image(frame, Some(window));
                         }
-                        self.artwork.update(cx, |cache, cx| cache.clear(window, cx));
+                        if self.session.as_ref().is_some_and(|s| s.automatic_return) {
+                            let game = &self.session.as_ref().unwrap().game;
+                            let keep = [&game.background, &game.logo, &game.cover]
+                                .into_iter()
+                                .filter(|p| !p.is_empty())
+                                .map(|p| Resource::Path(Arc::from(Path::new(p))))
+                                .collect();
+                            self.artwork
+                                .update(cx, |cache, cx| cache.retain_only(&keep, window, cx));
+                        }
                         log(&self.base, "game_started", "", self.start);
                         cx.notify();
                     }
                     launch::LaunchEvent::Ended => {
-                        self.phase = Phase::Library;
-                        self.last_page = if self.details { "details" } else { "home" };
-                        self.page_motion = motion::Tween::new(1., now);
-                        finished = true;
+                        if let Some(session) = &mut self.session {
+                            session.ended = true;
+                            session.requested = now;
+                            finished = !session.automatic_return;
+                        }
                         log(&self.base, "game_ended", "", self.start);
-                        focus::restore(window);
-                        log(
-                            &self.base,
-                            "return_focus",
-                            &focus::state(window),
-                            self.start,
-                        );
                         cx.notify();
                     }
                     launch::LaunchEvent::Failed(message) => {
                         self.phase = Phase::Failed(message.clone());
-                        focus::restore(window);
+                        if let Some(session) = &mut self.session {
+                            session.automatic_return = false;
+                        }
                         finished = true;
                         log(&self.base, "launch_failed", &message, self.start);
                         cx.notify();
@@ -811,16 +920,15 @@ impl Launcher {
             }
         }
         if finished {
-            self.launch_rx = None;
-            self.game_minimized = false;
-            self.refresh_paused.store(false, Ordering::Relaxed);
-            self.reset_media();
-            window.focus(&self.focus);
+            self.finish_session(window, cx);
         }
-        // The same window stays alive. Explicitly returning to it must not
-        // cause another automatic minimize or cancel process tracking.
-        if self.game_minimized && window.is_window_active() {
-            self.game_minimized = false;
+        let active = window.is_window_active();
+        if active && !self.was_active {
+            self.guard_return_input();
+        }
+        self.was_active = active;
+        if self.keyboard_release && !focus::action_keys_down() {
+            self.keyboard_release = false;
         }
         let was_connected = self.controller.connected;
         let was_kind = self.controller.kind;
@@ -1049,6 +1157,75 @@ impl Launcher {
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.artwork.update(cx, |cache, _| cache.begin_frame());
+        // Back can arrive after Ended but before the return artwork resolves.
+        // Manual browsing must still release the completed session's launch lock.
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.ended && !s.automatic_return)
+        {
+            self.finish_session(window, cx);
+        }
+        if let Some(session) = self.session.as_ref().filter(|s| s.automatic_return) {
+            // Pin only these three images through gameplay. The cover is needed
+            // by Details on return; video is never a readiness prerequisite.
+            let mut ready = true;
+            for path in [
+                &session.game.background,
+                &session.game.logo,
+                &session.game.cover,
+            ] {
+                if !path.is_empty() {
+                    let resource = Resource::Path(Arc::from(Path::new(path)));
+                    ready &= self
+                        .artwork
+                        .update(cx, |cache, cx| cache.load(&resource, window, cx))
+                        .is_some();
+                }
+            }
+            // Broken/slow artwork must not trap the user on a status screen.
+            let timed_out = session.requested.elapsed() >= Duration::from_secs(2);
+            if ready || timed_out {
+                if session.ended {
+                    self.finish_session(window, cx);
+                } else if session.pending.is_some() && !session.frame_queued {
+                    self.session.as_mut().unwrap().frame_queued = true;
+                    let generation = self.launch_generation;
+                    let entity = cx.entity().downgrade();
+                    // Queued during render: GPUI processes this callback before
+                    // the *following* frame, after this opaque scene is presented.
+                    window.on_next_frame(move |window, cx| {
+                        let _ = entity.update(cx, |this, cx| {
+                            if this.launch_generation != generation {
+                                return;
+                            }
+                            let Some(session) = &mut this.session else {
+                                return;
+                            };
+                            let Some(tx) = session.pending.take() else {
+                                return;
+                            };
+                            focus::release(window);
+                            log(
+                                &this.base,
+                                "status_presented",
+                                "dispatching game",
+                                this.start,
+                            );
+                            log(
+                                &this.base,
+                                "focus_released",
+                                &focus::state(window),
+                                this.start,
+                            );
+                            launch::start(session.game.launch.clone(), tx);
+                            cx.notify();
+                        });
+                    });
+                    window.request_animation_frame();
+                }
+            }
+        }
         if !self.first_render {
             self.first_render = true;
             let base = self.base.clone();
@@ -1074,7 +1251,9 @@ impl Render for Launcher {
         let footer_height = 36. * s;
         let rail_footer_gap = 28. * s;
         let visible = self.visible();
-        let game = if visible.is_empty() {
+        let game = if let Some(session) = self.session.as_ref().filter(|s| s.automatic_return) {
+            session.game.clone()
+        } else if visible.is_empty() {
             Game::default()
         } else {
             self.game().cloned().unwrap_or_default()
@@ -1102,7 +1281,12 @@ impl Render for Launcher {
         };
         if self.last_page != page {
             let browsing = |p| matches!(p, "home" | "empty");
-            if !self.last_page.is_empty() && !(browsing(page) && browsing(self.last_page)) {
+            let status = |p| matches!(p, "launching" | "running");
+            if !self.last_page.is_empty()
+                && !(browsing(page) && browsing(self.last_page))
+                && !status(page)
+                && !status(self.last_page)
+            {
                 self.page_motion = motion::Tween::new(0., now);
                 self.page_motion
                     .to(1., if page == "details" { 340 } else { 240 }, now);
@@ -1173,6 +1357,13 @@ impl Render for Launcher {
             .text_color(rgb(0xf4f5f5))
             .font_family("Segoe UI")
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if !this.was_active {
+                    this.guard_return_input();
+                    this.was_active = true;
+                }
+                if this.keyboard_release {
+                    return;
+                }
                 // A held confirm must not select a game and then launch it.
                 if event.is_held
                     && !matches!(

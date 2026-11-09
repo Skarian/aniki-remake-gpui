@@ -368,6 +368,22 @@ mod tests {
         );
     }
     #[test]
+    fn held_game_exit_back_cannot_skip_return_details() {
+        let mut c = Controller::new();
+        let now = Instant::now();
+        c.process(XINPUT_GAMEPAD_B.0, now);
+        c.require_release();
+        assert!(
+            c.process(XINPUT_GAMEPAD_B.0, now + Duration::from_secs(1))
+                .is_empty()
+        );
+        assert!(c.process(0, now + Duration::from_secs(2)).is_empty());
+        assert_eq!(
+            c.process(XINPUT_GAMEPAD_B.0, now + Duration::from_secs(3)),
+            vec![Input::Back]
+        );
+    }
+    #[test]
     fn held_accept_never_launches_twice() {
         let mut c = Controller::new();
         let now = Instant::now();

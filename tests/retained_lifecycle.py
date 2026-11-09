@@ -18,6 +18,8 @@ log=app/'artifacts/session.jsonl'
 u=c.WinDLL('user32'); k=c.WinDLL('kernel32')
 u.GetForegroundWindow.restype=c.c_void_p
 u.IsIconic.argtypes=[c.c_void_p]; u.IsWindow.argtypes=[c.c_void_p]
+u.IsWindowVisible.argtypes=[c.c_void_p]
+u.GetWindowLongW.argtypes=[c.c_void_p,c.c_int]
 u.GetWindowThreadProcessId.argtypes=[c.c_void_p,c.POINTER(c.c_ulong)]
 k.OpenProcess.argtypes=[c.c_ulong,c.c_bool,c.c_ulong]; k.OpenProcess.restype=c.c_void_p
 k.TerminateProcess.argtypes=[c.c_void_p,c.c_uint]; k.CloseHandle.argtypes=[c.c_void_p]
@@ -52,11 +54,12 @@ def page(rows):
     return frames[-1]['page'] if frames else None
 
 results=[]
-for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox','close'),('ps','exit')]:
+for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]:
     if log.exists(): log.rename(app/'artifacts'/f'session-{time.time_ns()}.jsonl')
     marker=app/f'{family}-{mode}.hwnd'
     marker.unlink(missing_ok=True); Path(str(marker)+'.transition').unlink(missing_ok=True)
-    game=dict(id='fixture',name='Lifecycle fixture',platform='PC',launch=dict(kind='process',executable=str(app/'WindowFixture.exe'),arguments=f'{mode} "{marker}"',working_dir=str(app),install_dir=str(app)))
+    fixture_mode='exit' if mode.startswith('held-') else mode
+    game=dict(id='fixture',name='Lifecycle fixture',platform='PC',launch=dict(kind='process',executable=str(app/'WindowFixture.exe'),arguments=f'{fixture_mode} "{marker}"',working_dir=str(app),install_dir=str(app)))
     if mode=='missing': game['launch']['executable']=str(app/'MissingGame.exe')
     library=dict(games=[game],exported_utc='',platform_art={})
     def save(): (app/'cache/library.json').write_text(json.dumps(library))
@@ -95,8 +98,17 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox',
             press('back');assert page(events())=='details'
         for cycle in range(0 if mode=='missing' else 2 if mode=='exit' else 1):
             press('accept')
-            wait(lambda r:sum(e['event']=='game_minimized' for e in r)==cycle+1)
-            assert owner.poll() is None and u.IsWindow(hwnd) and u.IsIconic(hwnd)
+            rows=wait(lambda r:sum(e['event']=='game_focused' for e in r)==cycle+1)
+            assert owner.poll() is None and u.IsWindow(hwnd) and not u.IsIconic(hwnd)
+            assert u.IsWindowVisible(hwnd)
+            assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Launcher stayed topmost over game'
+            game_hwnd=int(marker.read_text())
+            assert u.GetForegroundWindow()==game_hwnd
+            launches=[e for e in rows if e['event'] in ('status_presented','game_started')]
+            assert [e['event'] for e in launches[-2:]]==['status_presented','game_started']
+            wait(lambda r:page(r)=='running')
+            if mode.startswith('held-'):
+                pad.press_button(button=buttons[mode.removeprefix('held-')]);pad.update()
             assert not any(w[2]=='AnikiSessionBlack' for w in windows())
             assert sum(e['event']=='snapshot_loaded' for e in events())==1
             if mode=='close':
@@ -105,14 +117,22 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox',
                 wait(lambda _:Path(str(marker)+'.transition').exists())
                 time.sleep(2.5)
                 assert not any(e['event']=='game_ended' for e in events()),'Window close falsely ended process tracking'
+                assert page(events())=='running' and u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd)
                 follower=subprocess.Popen([str(app/'aniki-remake-gpui.exe')],cwd=app);followers.append(follower)
                 wait(lambda r:any(e['event']=='session_activated' for e in r))
                 assert not u.IsIconic(hwnd) and u.GetForegroundWindow()==hwnd
                 press('back'); assert page(events())=='details'
+                press('back'); assert page(events())=='home'
                 # Returning to the library does not terminate the game or forget tracking.
                 assert not any(e['event']=='game_ended' for e in events())
                 k.TerminateProcess(handle,0); k.CloseHandle(handle);handle=None
-            rows=wait(lambda r:sum(e['event']=='return_focus' for e in r)==cycle+1 and page(r)=='details')
+            expected='home' if mode=='close' else 'details'
+            rows=wait(lambda r:sum(e['event']=='return_focus' for e in r)==cycle+1 and page(r)==expected)
+            if mode.startswith('held-'):
+                time.sleep(.8)
+                assert page(events())=='details','Held game-exit input skipped Details'
+                assert sum(e['event']=='launch_requested' for e in events())==1,'Held confirm relaunched game'
+                pad.reset();pad.update();time.sleep(.2)
             wait(lambda _:u.GetForegroundWindow()==hwnd)
             assert u.IsWindow(hwnd) and not u.IsIconic(hwnd) and u.GetForegroundWindow()==hwnd
             assert [w[0] for w in windows() if w[1]==owner.pid]==[hwnd]
@@ -122,7 +142,9 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox',
         follower=subprocess.Popen([str(app/'aniki-remake-gpui.exe')],cwd=app);followers.append(follower)
         wait(lambda r:sum(e['event']=='session_activated' for e in r)>n)
         assert [w[0] for w in windows() if w[1]==owner.pid]==[hwnd]
-        press('back');press('menu')
+        if page(events())=='details': press('back')
+        assert page(events())=='home'
+        press('menu')
         for _ in range(3):press('down')
         press('accept');owner.wait(timeout=5);assert owner.returncode==0
         for f in followers:f.wait(timeout=5);assert f.returncode==0
