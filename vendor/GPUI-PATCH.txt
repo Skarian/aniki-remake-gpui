@@ -1,0 +1,26 @@
+GPUI 0.2.2, vendored from the existing crates.io package.
+Original license: gpui/LICENSE-APACHE.
+
+Local changes, 2026-11-09:
+- Frontend windows launched by the same-binary session host disable Windows'
+  show/hide animations before first display (ANIKI_SESSION_FRONTEND environment
+  flag). The native black cover masks preparation; GPUI renders the return fade.
+- Windows SIZE_MINIMIZED reduces DirectX rendering surfaces to 1x1 while
+  preserving the window's logical bounds. Restoring always resizes the renderer
+  to the actual client size and restores its frame-request callback.
+- DirectX resize unbinds vertex/pixel shader resources so old textures are not
+  held alive by context bindings after cache eviction and minimization.
+- Render-target ownership uses Option rather than manual destruction. A failed
+  resize leaves an empty target; drawing retries resize before accessing it.
+- On reduction to 1x1, Flush and IDXGIDevice3::Trim submit deferred destruction
+  and discard driver scratch allocations before the app stops presenting.
+  Only slot-0 texture bindings are cleared; other pipeline state is preserved.
+  Reference: https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nf-dxgi1_3-idxgidevice3-trim
+
+Purpose: Aniki minimizes after a tracked game starts and takes focus, freeing every
+artwork and video image. The default renderer otherwise retains its full-size
+swap-chain and 4x MSAA path surfaces throughout gameplay. The process and
+window remain alive, preserving Apollo's application session and game tracking.
+
+No atlas allocator changes, rendering-quality changes, or video backend rewrite.
+The app's normal foreground-restore path shows the window when the game exits.
