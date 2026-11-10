@@ -83,6 +83,8 @@ struct GameSession {
     requested: Instant,
     automatic_return: bool,
     ended: bool,
+    started: bool,
+    cancel: Arc<AtomicBool>,
 }
 struct Launcher {
     base: PathBuf,
@@ -400,6 +402,8 @@ impl Launcher {
             requested: Instant::now(),
             automatic_return: true,
             ended: false,
+            started: false,
+            cancel: Arc::new(AtomicBool::new(false)),
         });
         self.previous_background.clear();
         self.background_pending = false;
@@ -496,11 +500,12 @@ impl Launcher {
             if input == Input::Back
                 || matches!(self.phase, Phase::Failed(_)) && input == Input::Accept
             {
-                if self.session.as_ref().is_some_and(|s| s.pending.is_some()) {
-                    // Cancel a launch that has not crossed the presented-frame boundary.
+                if self.session.as_ref().is_some_and(|s| !s.started) {
+                    self.session.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
                     self.session = None;
                     self.launch_rx = None;
                     self.refresh_paused.store(false, Ordering::Relaxed);
+                    focus::release(window);
                 } else if let Some(session) = &mut self.session {
                     session.automatic_return = false;
                     focus::release(window);
@@ -887,15 +892,8 @@ impl Launcher {
                             self.start,
                         );
                     }
-                    launch::LaunchEvent::Focused(_) => {
-                        log(
-                            &self.base,
-                            "game_focused",
-                            "tracked game has foreground",
-                            self.start,
-                        );
-                    }
                     launch::LaunchEvent::Started => {
+                        if let Some(session) = &mut self.session { session.started = true; }
                         if self.phase == Phase::Launching {
                             self.phase = Phase::Running;
                         }
@@ -1236,7 +1234,7 @@ impl Render for Launcher {
                                 "dispatching game",
                                 this.start,
                             );
-                            launch::start(session.game.launch.clone(), tx);
+                            launch::start(session.game.launch.clone(), tx, session.cancel.clone());
                             cx.notify();
                         });
                     });

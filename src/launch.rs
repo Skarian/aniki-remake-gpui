@@ -2,13 +2,13 @@ use crate::library::LaunchPlan;
 use std::{
     collections::HashSet,
     path::Path,
-    sync::mpsc::Sender,
+    sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::Sender},
     time::{Duration, Instant},
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT},
-        System::{Com::*, Diagnostics::ToolHelp::*, Registry::*, Threading::*},
+        Foundation::{CloseHandle, ERROR_NO_MORE_FILES, HANDLE, HWND, LPARAM, RECT},
+        System::{Com::*, Diagnostics::ToolHelp::*, Registry::*, RemoteDesktop::ProcessIdToSessionId, Threading::*},
         UI::{
             Shell::{
                 SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
@@ -25,7 +25,6 @@ pub enum LaunchEvent {
     Started,
     Ready(u64),
     ReadinessExpired,
-    Focused(u64),
     Ended,
     Failed(String),
 }
@@ -102,18 +101,19 @@ pub struct Process {
     pub parent: u32,
     pub path: String,
 }
-pub fn processes() -> Vec<Process> {
+pub fn processes() -> windows::core::Result<Vec<Process>> {
     unsafe {
-        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
-            return vec![];
-        };
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
         let mut out = Vec::new();
-        if Process32FirstW(snap, &mut entry).is_ok() {
-            loop {
+        let mut next = Process32FirstW(snap, &mut entry);
+        while next.is_ok() {
+            let mut session = 0;
+            if entry.th32ProcessID != 0 && !(ProcessIdToSessionId(entry.th32ProcessID, &mut session).is_ok() && session == 0) {
+                let mut path = String::new();
                 if let Ok(handle) = OpenProcess(
                     PROCESS_QUERY_LIMITED_INFORMATION,
                     false,
@@ -129,21 +129,19 @@ pub fn processes() -> Vec<Process> {
                     )
                     .is_ok()
                     {
-                        out.push(Process {
-                            pid: entry.th32ProcessID,
-                            parent: entry.th32ParentProcessID,
-                            path: String::from_utf16_lossy(&buffer[..len as usize]),
-                        });
+                        path = String::from_utf16_lossy(&buffer[..len as usize]);
                     }
                     let _ = CloseHandle(handle);
                 }
-                if Process32NextW(snap, &mut entry).is_err() {
-                    break;
-                }
+                out.push(Process { pid: entry.th32ProcessID, parent: entry.th32ParentProcessID, path });
             }
+            next = Process32NextW(snap, &mut entry);
         }
         let _ = CloseHandle(snap);
-        out
+        match next {
+            Err(error) if error.code() != ERROR_NO_MORE_FILES.to_hresult() => Err(error),
+            _ => Ok(out),
+        }
     }
 }
 pub fn descendants(live: &[Process], tracked: &mut HashSet<u32>) {
@@ -300,7 +298,7 @@ impl Drop for ShellApartment {
         unsafe { CoUninitialize() };
     }
 }
-pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
+pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>, cancel: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let fail = |message: String| {
             let _ = tx.send(LaunchEvent::Failed(message));
@@ -320,7 +318,10 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
             return;
         }
         let _apartment = ShellApartment;
-        let before = processes();
+        let before = match processes() {
+            Ok(live) => live,
+            Err(error) => { fail(format!("Could not inspect running processes: {error}")); return; }
+        };
         let baseline: HashSet<u32> = before.iter().map(|p| p.pid).collect();
         let mut tracked = HashSet::new();
         let mut _child: Option<StartedProcess> = None;
@@ -338,6 +339,7 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
                     return;
                 }
             };
+            if cancel.load(Ordering::Relaxed) { return; }
             match start_process(&launch) {
                 Ok(child) => _child = Some(child),
                 Err(error) => {
@@ -360,9 +362,13 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
                 fail("This emulator or game is already running. Close it before starting another session.".into());
                 return;
             }
+            if cancel.load(Ordering::Relaxed) { return; }
             match start_process(&plan) {
                 Ok(c) => {
-                    tracked.insert(unsafe { GetProcessId(c.0) });
+                    let pid = unsafe { GetProcessId(c.0) };
+                    if pid == 0 { fail("The launch returned no trackable process.".into()); return; }
+                    tracked.insert(pid);
+                    let _ = tx.send(LaunchEvent::Started);
                     _child = Some(c)
                 }
                 Err(e) => {
@@ -375,9 +381,11 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
             return;
         }
         let clock = Instant::now();
-        let mut started = false;
-        let mut focused = false;
+        let mut started = plan.kind == "process";
         let mut uncovered = false;
+        let mut expired = false;
+        let mut next_lifecycle = clock;
+        let mut failures = 0;
         let mut readiness = Readiness::default();
         let mut gone = 0u8;
         let install = plan
@@ -386,8 +394,21 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
             .to_lowercase()
             + "\\";
         loop {
-            std::thread::sleep(Duration::from_millis(350));
-            let live = processes();
+            // Kept Steam fusion retains its original sleep-first cadence.
+            if plan.kind == "steam" { std::thread::sleep(Duration::from_millis(350)); }
+            if cancel.load(Ordering::Relaxed) { break; }
+            let now = Instant::now();
+            let lifecycle = plan.kind == "steam" || now >= next_lifecycle;
+            if lifecycle { next_lifecycle = now + Duration::from_secs(2); }
+            let live = match processes() {
+                Ok(live) => { if lifecycle { failures = 0; } live }
+                Err(error) => {
+                    if lifecycle { failures += 1; }
+                    if failures >= 5 { fail(format!("Process tracking failed; the game is now untracked: {error}")); break; }
+                    std::thread::sleep(Duration::from_millis(350));
+                    continue;
+                }
+            };
             descendants(&live, &mut tracked);
             let game_pids: HashSet<u32> = live
                 .iter()
@@ -400,41 +421,31 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
                 if let Some(hwnd) = readiness.update(ready_window(&game_pids), Instant::now()) {
                     uncovered = true;
                     let _ = tx.send(LaunchEvent::Ready(hwnd));
-                } else if clock.elapsed() > Duration::from_secs(90) {
-                    uncovered = true;
+                } else if !expired && clock.elapsed() > Duration::from_secs(90) {
+                    expired = true;
                     let _ = tx.send(LaunchEvent::ReadinessExpired);
                 }
             }
-            if active {
+            if lifecycle && active {
                 gone = 0;
                 if !started {
                     started = true;
                     let _ = tx.send(LaunchEvent::Started);
                 }
-                // Foreground evidence is separate from readiness; retaining the
-                // status window never requires minimizing it.
-                if uncovered && !focused {
-                    let foreground = unsafe { GetForegroundWindow() };
-                    let mut pid = 0;
-                    unsafe {
-                        GetWindowThreadProcessId(foreground, Some(&mut pid));
-                    }
-                    if game_pids.contains(&pid) {
-                        focused = true;
-                        let _ = tx.send(LaunchEvent::Focused(foreground.0 as usize as u64));
-                    }
-                }
-            } else if started
-                && end_observation_allowed(plan.kind == "steam", uncovered, clock.elapsed())
+            } else if lifecycle && !active && started
+                && end_observation_allowed(plan.kind == "steam", uncovered || expired, clock.elapsed())
             {
                 gone += 1;
-                if gone >= 3 {
+                if plan.kind == "process" || gone >= 3 {
                     let _ = tx.send(LaunchEvent::Ended);
                     break;
                 }
-            } else if clock.elapsed() > Duration::from_secs(90) {
+            } else if plan.kind == "steam" && !active && !started && clock.elapsed() > Duration::from_secs(90) {
                 fail("The game did not start within 90 seconds. Return to the library and try again.".into());
                 break;
+            }
+            if plan.kind != "steam" {
+                std::thread::sleep(if uncovered || expired { Duration::from_secs(2) } else { Duration::from_millis(350) });
             }
         }
     });
