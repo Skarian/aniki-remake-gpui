@@ -28,7 +28,7 @@ class WindowFixture {
             File.WriteAllText(output, form.Handle.ToInt64().ToString());
             if(mode != "noactivate") { form.Activate(); SetForegroundWindow(form.Handle); }
         };
-        var timer = new Timer { Interval = mode == "late" ? 102000 : mode == "delayed" ? 11000 : 5000 };
+        var timer = new Timer { Interval = mode == "sentinel" ? 120000 : mode == "late" ? 102000 : mode == "delayed" ? 11000 : 5000 };
         timer.Tick += (s,e) => {
             timer.Stop();
             if(mode == "game-crash") Environment.Exit(7);

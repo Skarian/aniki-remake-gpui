@@ -62,9 +62,12 @@ Music and trailer audio use FFmpeg and a bounded SDL stereo queue. Music loops, 
 
 ## Verification
 
+The [2026-11-10 QA report](docs/qa-2026-11-10.md) records the tested builds, the corrected startup-focus regression, and remaining release gates. The realignment candidate is not yet deployed.
+
 - `build.ps1 -Test`: Rust tests for launch resolution, process tracking, input, cache ownership, and motion.
 - `python tests/retained_lifecycle.py --exe <built-exe> --expected-sha256 <recorded-hash>`: real-window tests proving the launcher PID and HWND survive two game cycles each with Xbox and virtual DualShock 4 input; also covers lingering processes, explicit restore, duplicate invocation, missing executables, owner crashes, and normal exit. Builds its own WinForms fixture and needs no game library.
 - Add `--artwork-from-cache` to exercise that lifecycle with real local background, logo, and cover images from the existing cache. The test reads those files without changing the library.
+- The explicitly selected `--modes xbox:pending` case launches the local DAVE THE DIVER Steam entry to test cancellation; it is excluded from the default fixture suite and requires a normal game close afterward.
 - `tests/selection_flow.py`: full preview navigation, Details actions, menu restrictions, and video with virtual Xbox / DualShock 4 controllers. See the script's startup instructions.
 
 Controller integration tests require Python's `vgamepad` package and an existing ViGEm driver. They do not install drivers. Tests create isolated copies under `artifacts`; do not run interactive tests while using another controller application.

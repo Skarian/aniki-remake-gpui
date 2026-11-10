@@ -8,7 +8,9 @@ p.add_argument('--directory',required=True)
 p.add_argument('--app-id',required=True)
 p.add_argument('--output',type=Path,required=True)
 p.add_argument('--seconds',type=float,default=180)
+p.add_argument('--interval-ms',type=float,default=250)
 args=p.parse_args()
+if args.interval_ms <= 0: p.error('--interval-ms must be positive')
 directory=os.path.normcase(os.path.realpath(args.directory)).rstrip('\\/')
 k=c.WinDLL('kernel32',use_last_error=True)
 u=c.WinDLL('user32',use_last_error=True)
@@ -59,7 +61,7 @@ if stop.exists(): raise SystemExit('Use a fresh output name; stop marker already
 start=time.perf_counter();deadline=start
 with args.output.open('x',encoding='utf-8') as out:
     out.write(json.dumps(dict(type='metadata',directory=directory,app_id=args.app_id,
-                              started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),interval_ms=250))+'\n')
+                              started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),interval_ms=args.interval_ms))+'\n')
     while time.perf_counter()-start<args.seconds and not stop.exists():
         sampled=time.perf_counter();row=snapshot()
         try:
@@ -72,6 +74,6 @@ with args.output.open('x',encoding='utf-8') as out:
                    scan_ms=round((time.perf_counter()-sampled)*1000,3),steam_running=running,
                    foreground_hwnd=foreground,foreground_pid=pid.value)
         out.write(json.dumps(row)+'\n');out.flush()
-        deadline+=.25
+        deadline+=args.interval_ms/1000
         time.sleep(max(0,deadline-time.perf_counter()))
 print(str(args.output),flush=True)

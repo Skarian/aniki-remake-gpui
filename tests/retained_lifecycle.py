@@ -13,6 +13,8 @@ parser.add_argument('--label',default='candidate')
 parser.add_argument('--modes',help='Comma-separated mode or controller:mode selections')
 parser.add_argument('--artwork-from-cache',action='store_true')
 parser.add_argument('--foreground-setup',action='store_true',help='Allow explicit initial activation; does not certify automatic startup')
+parser.add_argument('--fixture-source',type=Path,default=root/'tests/WindowFixture.cs',help='Explicit scratch fixture variant for negative-control validation')
+parser.add_argument('--startup-diagnostic',action='store_true',help='Read-only startup snapshots; never certifies a passing case')
 args=parser.parse_args()
 binary=args.exe.resolve()
 digest=hashlib.sha256(binary.read_bytes()).hexdigest()
@@ -31,7 +33,9 @@ shutil.copy2(binary,app/'aniki-remake-gpui.exe')
 assert hashlib.sha256((app/'aniki-remake-gpui.exe').read_bytes()).hexdigest()==digest
 shutil.copy2(root/'SDL2.dll',app/'SDL2.dll')
 shutil.copytree(root/'assets',app/'assets',dirs_exist_ok=True)
-subprocess.run([r'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe','/nologo','/target:winexe','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/out:'+str(app/'WindowFixture.exe'),str(root/'tests/WindowFixture.cs')],check=True)
+report['fixture_source']=str(args.fixture_source.resolve())
+report['fixture_sha256']=hashlib.sha256(args.fixture_source.read_bytes()).hexdigest()
+subprocess.run([r'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe','/nologo','/target:winexe','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/out:'+str(app/'WindowFixture.exe'),str(args.fixture_source)],check=True)
 (app/'aniki-remake-gpui.json').write_text(json.dumps(dict(playnite_root=str(app/'no-playnite'),fullscreen=True,music=False,video=False)))
 log=app/'artifacts/session.jsonl'
 u=c.WinDLL('user32'); k=c.WinDLL('kernel32')
@@ -90,11 +94,16 @@ if args.artwork_from_cache:
     source=next(g for g in cached['games'] if all(g.get(k) and Path(g[k]).is_file() for k in ('background','logo','cover')))
     artwork={k:source[k] for k in ('background','logo','cover')}
 cases=[('xbox','immediate'),('xbox','late'),('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbox','fullscreen'),('xbox','noactivate'),('xbox','exit'),('xbox','minimized-return'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]
+cases.append(('xbox','pending'))
+cases.append(('xbox','cancel-before-dispatch'))
 if args.modes:
     requested=set(args.modes.split(','))
     available={mode for _,mode in cases}|{f'{family}:{mode}' for family,mode in cases}
     if requested-available: raise SystemExit(f'Unknown cases: {requested-available}')
     cases=[(family,mode) for family,mode in cases if mode in requested or f'{family}:{mode}' in requested]
+else:
+    # This explicit real-game lane is not part of the personal-library-free suite.
+    cases=[(family,mode) for family,mode in cases if mode!='pending']
 report['requested_cases']=[f'{family}:{mode}' for family,mode in cases]
 report['status']='running'
 for family,mode in cases:
@@ -104,6 +113,13 @@ for family,mode in cases:
     fixture_mode='exit' if mode.startswith('held-') or mode=='minimized-return' else mode
     game=dict(id='fixture',name='Lifecycle fixture',platform='PC',launch=dict(kind='process',executable=str(app/'WindowFixture.exe'),arguments=f'{fixture_mode} "{marker}"',working_dir=str(app),install_dir=str(app)))
     game.update(artwork)
+    if mode=='pending':
+        # A valid but empty directory exercises the accepted never-matching
+        # Steam contract. The real game is outside it and must never be killed.
+        empty=app/'never-matching';empty.mkdir(exist_ok=True)
+        cached=json.loads((root/'cache/library.json').read_text(encoding='utf-8-sig'))
+        dave=next(g for g in cached['games'] if g['name']=='DAVE THE DIVER')
+        game['launch']=dict(dave['launch'],install_dir=str(empty))
     if mode=='missing': game['launch']['executable']=str(app/'MissingGame.exe')
     library=dict(games=[game],exported_utc='',platform_art={})
     def save(): (app/'cache/library.json').write_text(json.dumps(library))
@@ -114,7 +130,7 @@ for family,mode in cases:
         if family=='ps' and action=='down': pad.directional_pad(direction=vg.DS4_DPAD_DIRECTIONS.DS4_BUTTON_DPAD_SOUTH)
         else: pad.press_button(button=buttons[action])
         pad.update();time.sleep(hold);pad.reset();pad.update();time.sleep(.35)
-    owner=None; followers=[]; handle=None
+    owner=None; followers=[]; handle=None; sentinels=[]
     output=open(app/'artifacts'/f'stderr-{family}-{mode}.log','wb')
     try:
         owner=subprocess.Popen([str(app/'aniki-remake-gpui.exe'),'--trace-motion','--trace-memory'],cwd=app,stdout=output,stderr=subprocess.STDOUT)
@@ -122,6 +138,29 @@ for family,mode in cases:
         own=[w for w in windows() if w[1]==owner.pid]
         assert len(own)==1,own
         hwnd=own[0][0]
+        if args.startup_diagnostic:
+            class GuiInfo(c.Structure):
+                _fields_=[('size',c.c_ulong),('flags',c.c_ulong),('active',c.c_void_p),('focus',c.c_void_p),('capture',c.c_void_p),('menu',c.c_void_p),('move',c.c_void_p),('caret',c.c_void_p),('rect',c.c_long*4)]
+            u.GetGUIThreadInfo.argtypes=[c.c_ulong,c.POINTER(GuiInfo)]
+            u.OpenInputDesktop.argtypes=[c.c_ulong,c.c_bool,c.c_ulong];u.OpenInputDesktop.restype=c.c_void_p
+            u.GetUserObjectInformationW.argtypes=[c.c_void_p,c.c_int,c.c_void_p,c.c_ulong,c.POINTER(c.c_ulong)]
+            u.CloseDesktop.argtypes=[c.c_void_p]
+            observations=[]
+            for delay in (0,.5,1,3):
+                time.sleep(delay)
+                foreground=u.GetForegroundWindow();pid=c.c_ulong()
+                u.GetWindowThreadProcessId(foreground,c.byref(pid))
+                title=c.create_unicode_buffer(512);u.GetWindowTextW(c.c_void_p(foreground),title,512)
+                sid=c.c_ulong();k.ProcessIdToSessionId(owner.pid,c.byref(sid))
+                tid=u.GetWindowThreadProcessId(c.c_void_p(hwnd),None);gui=GuiInfo();gui.size=c.sizeof(gui)
+                gui_ok=u.GetGUIThreadInfo(tid,c.byref(gui))
+                desktop=u.OpenInputDesktop(0,False,1);name=c.create_unicode_buffer(512);size=c.c_ulong()
+                desktop_ok=bool(desktop and u.GetUserObjectInformationW(desktop,2,name,c.sizeof(name),c.byref(size)))
+                if desktop:u.CloseDesktop(desktop)
+                observations.append(dict(time=time.time(),launcher_pid=owner.pid,launcher_hwnd=hwnd,foreground_hwnd=foreground,foreground_pid=pid.value,foreground_title=title.value,iconic=bool(u.IsIconic(hwnd)),topmost=bool(u.GetWindowLongW(hwnd,-20)&8),gui_ok=bool(gui_ok),gui_active=gui.active,gui_focus=gui.focus,input_desktop_available=desktop_ok,input_desktop_name=name.value,launcher_session=sid.value,active_console_session=k.WTSGetActiveConsoleSessionId()))
+            report['startup_diagnostic']=dict(user=subprocess.check_output(['whoami'],text=True).strip(),observations=observations)
+            report['status']='diagnostic-only'
+            continue
         if args.foreground_setup: print(f'Foreground setup: pid={owner.pid} hwnd={hwnd}',flush=True)
         wait(lambda _:u.GetForegroundWindow()==hwnd,timeout=90 if args.foreground_setup else 20)
         expected_kind='PlayStation' if family=='ps' else 'Xbox'
@@ -142,6 +181,30 @@ for family,mode in cases:
         wait(lambda r:page(r)=='home')
         press('accept',.7)
         wait(lambda r:page(r)=='details')
+        if mode=='cancel-before-dispatch':
+            # Both edges are sampled together: Accept queues the render, Back
+            # cancels in that input batch before the next rendered callback.
+            pad.press_button(button=buttons['accept']);pad.press_button(button=buttons['back']);pad.update()
+            time.sleep(.12);pad.reset();pad.update()
+            wait(lambda r:any(e['event']=='launch_requested' for e in r) and page(r)=='details')
+            time.sleep(.6)
+            assert not any(e['event'] in ('status_presented','game_started','launch_failed') for e in events()),'Cancelled launch dispatched'
+            assert not marker.exists(),'Cancelled fixture was created'
+            assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Pre-dispatch cancel retained topmost'
+        if mode=='pending':
+            restores_before_cancel=sum(e['event']=='native_restored' for e in events())
+            for attempt in range(2):
+                press('accept')
+                wait(lambda r:sum(e['event']=='status_presented' for e in r)==attempt+1)
+                time.sleep(.5)
+                assert not any(e['event']=='game_started' for e in events())
+                press('back')
+                assert page(events())=='details'
+                assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Pending cancellation retained topmost'
+            time.sleep(3)
+            assert not any(e['event'] in ('game_started','focus_released','launch_failed') for e in events()),'Abandoned worker delivered stale lifecycle events'
+            assert sum(e['event']=='native_restored' for e in events())==restores_before_cancel,'Abandoned worker restored focus'
+            report['pending_note']='Two real Steam dispatches, empty monitored directory; Dave is untracked and requires normal external close.'
         if mode=='missing':
             press('accept')
             wait(lambda r:any(e['event']=='launch_failed' for e in r) and page(r)=='error')
@@ -149,7 +212,7 @@ for family,mode in cases:
             assert not u.IsIconic(hwnd)
             assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Failed launch retained topmost'
             press('back');assert page(events())=='details'
-        for cycle in range(0 if mode=='missing' else 2 if mode=='exit' else 1):
+        for cycle in range(0 if mode in ('missing','pending','cancel-before-dispatch') else 2 if mode=='exit' else 1):
             assert page(events())=='details','Play requires the Details page'
             press('accept')
             if mode=='immediate':
@@ -186,6 +249,12 @@ for family,mode in cases:
             if mode=='minimized-return':
                 u.ShowWindow(c.c_void_p(hwnd),6)
                 wait(lambda _:u.IsIconic(hwnd))
+                sentinel_marker=app/f'{family}-{mode}-sentinel.hwnd'
+                sentinel_marker.unlink(missing_ok=True)
+                sentinels.append(subprocess.Popen([str(app/'WindowFixture.exe'),'sentinel',str(sentinel_marker)],cwd=app))
+                wait(lambda _:sentinel_marker.exists())
+                sentinel_hwnd=int(sentinel_marker.read_text())
+                wait(lambda _:u.GetForegroundWindow()==sentinel_hwnd)
             if mode.startswith('held-'):
                 pad.press_button(button=buttons[mode.removeprefix('held-')]);pad.update()
             assert not any(w[2]=='AnikiSessionBlack' for w in windows())
@@ -204,6 +273,13 @@ for family,mode in cases:
                 press('back'); assert page(events())=='home'
                 # Returning to the library does not terminate the game or forget tracking.
                 assert not any(e['event']=='game_ended' for e in events())
+                sentinel_marker=app/f'{family}-{mode}-sentinel.hwnd'
+                sentinel_marker.unlink(missing_ok=True)
+                sentinels.append(subprocess.Popen([str(app/'WindowFixture.exe'),'sentinel',str(sentinel_marker)],cwd=app))
+                wait(lambda _:sentinel_marker.exists())
+                sentinel_hwnd=int(sentinel_marker.read_text())
+                wait(lambda _:u.GetForegroundWindow()==sentinel_hwnd)
+                restores_before_stop=sum(e['event']=='native_restored' for e in events())
                 k.TerminateProcess(handle,0); k.CloseHandle(handle);handle=None
             expected='home' if mode=='close' else 'details'
             rows=wait(lambda r:sum(e['event']=='return_focus' for e in r)==cycle+1 and page(r)==expected)
@@ -212,8 +288,13 @@ for family,mode in cases:
                 assert page(events())=='details','Held game-exit input skipped Details'
                 assert sum(e['event']=='launch_requested' for e in events())==1,'Held confirm relaunched game'
                 pad.reset();pad.update();time.sleep(.2)
-            wait(lambda _:u.GetForegroundWindow()==hwnd)
-            assert u.IsWindow(hwnd) and not u.IsIconic(hwnd) and u.GetForegroundWindow()==hwnd
+            if mode=='close':
+                time.sleep(.5)
+                assert u.GetForegroundWindow()==sentinel_hwnd,'Manual abandon reclaimed foreground'
+                assert sum(e['event']=='native_restored' for e in events())==restores_before_stop,'Manual abandon scheduled native restore'
+            else:
+                wait(lambda _:u.GetForegroundWindow()==hwnd)
+                assert u.IsWindow(hwnd) and not u.IsIconic(hwnd) and u.GetForegroundWindow()==hwnd
             assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Return retained topmost'
             assert [w[0] for w in windows() if w[1]==owner.pid]==[hwnd]
             assert sum(e['event']=='snapshot_loaded' for e in rows)==1
@@ -221,6 +302,8 @@ for family,mode in cases:
         n=sum(e['event']=='session_activated' for e in events())
         follower=subprocess.Popen([str(app/'aniki-remake-gpui.exe')],cwd=app);followers.append(follower)
         wait(lambda r:sum(e['event']=='session_activated' for e in r)>n)
+        # Activation is deferred; the diagnostic precedes actual foreground.
+        wait(lambda _:u.GetForegroundWindow()==hwnd)
         assert [w[0] for w in windows() if w[1]==owner.pid]==[hwnd]
         if page(events())=='details': press('back')
         assert page(events())=='home'
@@ -241,8 +324,10 @@ for family,mode in cases:
         if owner and owner.poll() is None:owner.terminate();owner.wait(timeout=5)
         for f in followers:
             if f.poll() is None:f.terminate();f.wait(timeout=5)
+        for sentinel in sentinels:
+            if sentinel.poll() is None:sentinel.terminate();sentinel.wait(timeout=5)
         output.close()
         time.sleep(.5)
         result_path.write_text(json.dumps(report,indent=2))
-report['status']='passed'
+if not args.startup_diagnostic:report['status']='passed'
 result_path.write_text(json.dumps(report,indent=2))
