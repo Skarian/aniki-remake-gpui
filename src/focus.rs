@@ -17,18 +17,16 @@ pub(crate) fn hwnd(window: &Window) -> Option<HWND> {
         _ => None,
     }
 }
+// Focus operations change stacking/visibility only, never geometry.
+fn position(h: HWND, band: HWND, flags: SET_WINDOW_POS_FLAGS) {
+    unsafe {
+        let _ = SetWindowPos(h, Some(band), 0, 0, 0, 0, flags | SWP_NOMOVE | SWP_NOSIZE);
+    }
+}
 pub fn release(window: &Window) {
     if let Some(h) = hwnd(window) {
         unsafe {
-            let _ = SetWindowPos(
-                h,
-                Some(HWND_NOTOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
+            position(h, HWND_NOTOPMOST, SWP_NOACTIVATE);
             let _ = AllowSetForegroundWindow(ASFW_ANY);
         }
     }
@@ -40,17 +38,7 @@ pub fn permit_game_activation() {
 }
 pub fn cover(window: &Window) {
     if let Some(h) = hwnd(window) {
-        unsafe {
-            let _ = SetWindowPos(
-                h,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        }
+        position(h, HWND_TOPMOST, SWP_NOACTIVATE);
     }
 }
 /// Remove the already-presented cover only when the game's window is stable.
@@ -68,15 +56,7 @@ pub fn handoff(window: &Window, game: u64) -> bool {
             let attached =
                 other != 0 && other != this && AttachThreadInput(this, other, true).as_bool();
             let _ = SetForegroundWindow(target);
-            let _ = SetWindowPos(
-                target,
-                Some(HWND_TOP),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-            );
+            position(target, HWND_TOP, SWP_SHOWWINDOW);
             if attached {
                 let _ = AttachThreadInput(this, other, false);
             }
@@ -107,18 +87,10 @@ pub fn restore(handle: usize) {
             let this = GetCurrentThreadId();
             let attached =
                 other != 0 && other != this && AttachThreadInput(this, other, true).as_bool();
-            let _ = SetWindowPos(
-                h,
-                Some(HWND_NOTOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-            );
+            position(h, HWND_NOTOPMOST, SWP_SHOWWINDOW);
             if !SetForegroundWindow(h).as_bool() {
                 for band in [HWND_TOPMOST, HWND_NOTOPMOST] {
-                    let _ = SetWindowPos(h, Some(band), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                    position(h, band, SET_WINDOW_POS_FLAGS::default());
                 }
                 let _ = BringWindowToTop(h);
             }
