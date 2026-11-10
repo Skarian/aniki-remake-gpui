@@ -5,20 +5,33 @@ using System.IO;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 class WindowFixture {
+    // Some games create a visible window without activating it. The launcher
+    // must perform the handoff rather than relying on the child to do it.
+    class PassiveForm : Form {
+        protected override bool ShowWithoutActivation { get { return true; } }
+    }
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
     [STAThread] static void Main(string[] args) {
         string mode = args[0], output = args[1];
-        var form = new Form { Text = "Aniki lifecycle fixture", Width = 900, Height = 600 };
+        Form form = mode == "noactivate" ? new PassiveForm() : new Form();
+        form.Text = "Aniki lifecycle fixture"; form.Width = 900; form.Height = 600;
+        if(mode == "fullscreen") { form.FormBorderStyle = FormBorderStyle.None; form.WindowState = FormWindowState.Maximized; }
+        if(mode == "delayed") {
+            form.Text = "Game splash";
+            var ready = new Timer { Interval = 1700 };
+            ready.Tick += (s,e) => { ready.Stop(); form.Text = "Aniki lifecycle fixture"; File.WriteAllText(output + ".ready", "ready"); };
+            ready.Start();
+        }
         var context = new ApplicationContext();
         form.Shown += (s,e) => {
             File.WriteAllText(output, form.Handle.ToInt64().ToString());
-            form.Activate(); SetForegroundWindow(form.Handle);
+            if(mode != "noactivate") { form.Activate(); SetForegroundWindow(form.Handle); }
         };
-        var timer = new Timer { Interval = 5000 };
+        var timer = new Timer { Interval = mode == "delayed" ? 8000 : 5000 };
         timer.Tick += (s,e) => {
             timer.Stop();
             if(mode == "game-crash") Environment.Exit(7);
-            if(mode == "exit") { form.Close(); Application.Exit(); }
+            if(mode == "exit" || mode == "delayed" || mode == "fullscreen" || mode == "noactivate") { form.Close(); Application.Exit(); }
             else if(mode == "minimize") form.WindowState = FormWindowState.Minimized;
             else if(mode == "replace") {
                 form.Hide();

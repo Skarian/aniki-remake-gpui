@@ -7,14 +7,14 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HWND},
-        System::{Diagnostics::ToolHelp::*, Registry::*, Threading::*},
+        Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT},
+        System::{Com::*, Diagnostics::ToolHelp::*, Registry::*, Threading::*},
         UI::{
             Shell::{
                 SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
-                ShellExecuteExW, ShellExecuteW,
+                ShellExecuteExW,
             },
-            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, SW_SHOWNORMAL},
+            WindowsAndMessaging::*,
         },
     },
     core::{PCWSTR, PWSTR, w},
@@ -23,9 +23,78 @@ use windows::{
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum LaunchEvent {
     Started,
+    Ready(u64),
+    ReadinessExpired,
     Focused(u64),
     Ended,
     Failed(String),
+}
+
+/// AnikiHelper likewise waits for a stable, usable game window before removing
+/// its splash. Process creation or a fleeting bootstrap window is insufficient.
+#[derive(Default)]
+struct Readiness {
+    candidate: Option<(u64, Instant)>,
+}
+impl Readiness {
+    fn update(&mut self, candidate: Option<u64>, now: Instant) -> Option<u64> {
+        match (self.candidate, candidate) {
+            (Some((old, since)), Some(current)) if old == current => {
+                (now.duration_since(since) >= Duration::from_millis(1500)).then_some(current)
+            }
+            (_, Some(current)) => {
+                self.candidate = Some((current, now));
+                None
+            }
+            (_, None) => {
+                self.candidate = None;
+                None
+            }
+        }
+    }
+}
+fn ready_window(pids: &HashSet<u32>) -> Option<u64> {
+    struct Search<'a> {
+        pids: &'a HashSet<u32>,
+        best: Option<(u64, i64)>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> windows::core::BOOL {
+        let search = unsafe { &mut *(param.0 as *mut Search<'_>) };
+        unsafe {
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if !search.pids.contains(&pid)
+                || !IsWindowVisible(hwnd).as_bool()
+                || IsIconic(hwnd).as_bool()
+                || IsHungAppWindow(hwnd).as_bool()
+            {
+                return true.into();
+            }
+            let mut rect = RECT::default();
+            if GetClientRect(hwnd, &mut rect).is_err() || rect.right < 320 || rect.bottom < 180 {
+                return true.into();
+            }
+            let mut title = [0u16; 256];
+            let len = GetWindowTextW(hwnd, &mut title);
+            let title = String::from_utf16_lossy(&title[..len.max(0) as usize]).to_lowercase();
+            if title.contains("splash") || title.contains("crash reporter") {
+                return true.into();
+            }
+            let area = rect.right as i64 * rect.bottom as i64;
+            if search.best.is_none_or(|(_, old)| area > old) {
+                search.best = Some((hwnd.0 as usize as u64, area));
+            }
+        }
+        true.into()
+    }
+    let mut search = Search { pids, best: None };
+    unsafe {
+        let _ = EnumWindows(
+            Some(visit),
+            LPARAM((&mut search as *mut Search<'_>) as isize),
+        );
+    }
+    search.best.map(|(hwnd, _)| hwnd)
 }
 #[derive(Clone, Debug)]
 pub struct Process {
@@ -166,6 +235,71 @@ fn steam_running(app: &str) -> bool {
             && value != 0
     }
 }
+fn registry_string(root: HKEY, key: &str, name: &str) -> Option<String> {
+    let key = wide(key);
+    let name = wide(name);
+    let mut buffer = [0u16; 32768];
+    let mut size = std::mem::size_of_val(&buffer) as u32;
+    unsafe {
+        RegGetValueW(
+            root,
+            PCWSTR(key.as_ptr()),
+            PCWSTR(name.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+        .ok()
+        .ok()?;
+    }
+    let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..len]))
+}
+fn steam_client(live: &[Process]) -> Option<String> {
+    let registered = registry_string(HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamExe")
+        .into_iter()
+        .chain(
+            [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]
+                .into_iter()
+                .filter_map(|key| {
+                    registry_string(HKEY_LOCAL_MACHINE, key, "InstallPath").map(|path| {
+                        Path::new(&path)
+                            .join("steam.exe")
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                }),
+        );
+    registered
+        .chain(
+            live.iter()
+                .filter(|p| {
+                    Path::new(&p.path).file_name().is_some_and(|name| {
+                        name.to_string_lossy().eq_ignore_ascii_case("steam.exe")
+                    })
+                })
+                .map(|p| p.path.clone()),
+        )
+        .find(|path| Path::new(path).is_file())
+}
+fn steam_plan(client: String, app: &str) -> Result<LaunchPlan, String> {
+    if app.is_empty() || !app.bytes().all(|b| b.is_ascii_digit()) || app.parse::<u64>().is_err() {
+        return Err(format!("Invalid Steam game ID: {app}"));
+    }
+    Ok(LaunchPlan {
+        kind: "process".into(),
+        executable: client,
+        arguments: format!("-silent \"steam://rungameid/{app}\""),
+        ..Default::default()
+    })
+}
+struct ShellApartment;
+impl Drop for ShellApartment {
+    fn drop(&mut self) {
+        unsafe { CoUninitialize() };
+    }
+}
 pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
     std::thread::spawn(move || {
         let fail = |message: String| {
@@ -175,25 +309,44 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
             fail(plan.error);
             return;
         }
+        // Shell execution can invoke COM handlers. Each launch worker needs its
+        // own apartment, independent of GPUI's UI thread initialization.
+        if let Err(error) =
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.ok()
+        {
+            fail(format!(
+                "Could not initialize Windows launch services: {error}"
+            ));
+            return;
+        }
+        let _apartment = ShellApartment;
         let before = processes();
         let baseline: HashSet<u32> = before.iter().map(|p| p.pid).collect();
         let mut tracked = HashSet::new();
         let mut _child: Option<StartedProcess> = None;
         if plan.kind == "steam" {
-            let url = wide(&format!("steam://rungameid/{}", plan.steam_id));
-            let result = unsafe {
-                ShellExecuteW(
-                    Some(HWND::default()),
-                    w!("open"),
-                    PCWSTR(url.as_ptr()),
-                    None,
-                    None,
-                    SW_SHOWNORMAL,
-                )
-            };
-            if result.0 as isize <= 32 {
-                fail("Steam could not open this game. Check that Steam is installed.".into());
+            // Match Playnite's SteamPlayController: invoke the Steam executable
+            // directly with its URI, rather than relying on a URL association.
+            let Some(client) = steam_client(&before) else {
+                fail("Steam's executable could not be found. Open Steam and try again.".into());
                 return;
+            };
+            let launch = match steam_plan(client, &plan.steam_id) {
+                Ok(launch) => launch,
+                Err(error) => {
+                    fail(error);
+                    return;
+                }
+            };
+            match start_process(&launch) {
+                Ok(child) => _child = Some(child),
+                Err(error) => {
+                    fail(format!(
+                        "Steam could not launch app {}: {error} (client: {})",
+                        plan.steam_id, launch.executable
+                    ));
+                    return;
+                }
             }
         } else if plan.kind == "process" {
             if !Path::new(&plan.executable).is_file() {
@@ -224,6 +377,8 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
         let clock = Instant::now();
         let mut started = false;
         let mut focused = false;
+        let mut uncovered = false;
+        let mut readiness = Readiness::default();
         let mut gone = 0u8;
         let install = plan
             .install_dir
@@ -241,15 +396,24 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
                 .collect();
             let matched = !game_pids.is_empty();
             let active = matched || (plan.kind == "steam" && steam_running(&plan.steam_id));
+            if !uncovered {
+                if let Some(hwnd) = readiness.update(ready_window(&game_pids), Instant::now()) {
+                    uncovered = true;
+                    let _ = tx.send(LaunchEvent::Ready(hwnd));
+                } else if clock.elapsed() > Duration::from_secs(90) {
+                    uncovered = true;
+                    let _ = tx.send(LaunchEvent::ReadinessExpired);
+                }
+            }
             if active {
                 gone = 0;
                 if !started {
                     started = true;
                     let _ = tx.send(LaunchEvent::Started);
                 }
-                // Only minimize the launcher after a tracked game's actual
-                // foreground window appears, never just on process creation.
-                if !focused {
+                // Foreground evidence is separate from readiness; retaining the
+                // status window never requires minimizing it.
+                if uncovered && !focused {
                     let foreground = unsafe { GetForegroundWindow() };
                     let mut pid = 0;
                     unsafe {
@@ -260,7 +424,9 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
                         let _ = tx.send(LaunchEvent::Focused(foreground.0 as usize as u64));
                     }
                 }
-            } else if started {
+            } else if started
+                && end_observation_allowed(plan.kind == "steam", uncovered, clock.elapsed())
+            {
                 gone += 1;
                 if gone >= 3 {
                     let _ = tx.send(LaunchEvent::Ended);
@@ -274,9 +440,65 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>) {
     });
 }
 
+// Steam bootstrap/anti-cheat processes can exit before the game process exists.
+// Keep the launch attempt alive until readiness or the existing startup deadline.
+fn end_observation_allowed(steam: bool, uncovered: bool, elapsed: Duration) -> bool {
+    !steam || uncovered || elapsed >= Duration::from_secs(90)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn steam_bootstrap_gap_is_not_a_completed_game_session() {
+        assert!(!end_observation_allowed(
+            true,
+            false,
+            Duration::from_secs(5)
+        ));
+        assert!(!end_observation_allowed(
+            true,
+            false,
+            Duration::from_secs(89)
+        ));
+        assert!(end_observation_allowed(
+            true,
+            false,
+            Duration::from_secs(90)
+        ));
+        assert!(end_observation_allowed(true, true, Duration::from_secs(5)));
+        assert!(end_observation_allowed(
+            false,
+            false,
+            Duration::from_secs(5)
+        ));
+    }
+    #[test]
+    fn replacement_and_disappearing_windows_restart_readiness() {
+        let now = Instant::now();
+        let mut r = Readiness::default();
+        assert_eq!(r.update(Some(1), now), None);
+        assert_eq!(r.update(Some(1), now + Duration::from_millis(1400)), None);
+        assert_eq!(r.update(Some(2), now + Duration::from_millis(1500)), None);
+        assert_eq!(r.update(None, now + Duration::from_millis(2900)), None);
+        assert_eq!(r.update(Some(2), now + Duration::from_millis(3000)), None);
+        assert_eq!(
+            r.update(Some(2), now + Duration::from_millis(4500)),
+            Some(2)
+        );
+    }
+    #[test]
+    fn steam_id_cannot_inject_additional_client_arguments() {
+        assert!(
+            steam_plan("steam.exe".into(), "4356430")
+                .unwrap()
+                .arguments
+                .contains("steam://rungameid/4356430")
+        );
+        for id in ["", "1\" -shutdown", "abc", "18446744073709551616"] {
+            assert!(steam_plan("steam.exe".into(), id).is_err());
+        }
+    }
     #[test]
     fn direct_launch_tracks_tree_not_unrelated_files_in_its_folder() {
         let p = Process {

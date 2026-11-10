@@ -42,7 +42,7 @@ Set Apollo's command to the full path of `aniki-remake-gpui.exe` and its working
 
 ## Game lifecycle
 
-The launcher keeps one fullscreen GPUI window visible. It presents the game's still background, logo, and orbit animation before dispatching launch, then releases topmost status so the game can take foreground. That status screen remains underneath throughout gameplay. Music and video stop; only the game's background, logo, and Details cover remain cached. The animation pauses while the launcher is inactive.
+The launcher keeps one fullscreen GPUI window visible. It presents the game's still background, logo, and orbit animation before dispatching launch. It holds that cover until a visible, responsive game window has remained stable for 1.5 seconds, then releases topmost status and hands over focus. That status screen remains underneath throughout gameplay. Music and video stop; only the game's background, logo, and Details cover remain cached. The animation pauses while the launcher is inactive. Back dismisses the cover; a 90-second readiness limit also uncovers the desktop without abandoning process tracking.
 
 When the tracked process tree exits, the **same window** returns to that game's Details page, collection, and scroll position. B returns Home. Held controller/keyboard input must be released first. If you deliberately browsed elsewhere during gameplay, your navigation is preserved. An unrelated foreground application is not displaced on return. There is no black-cover window, minimization, replacement frontend, or return fade from black. A second invocation activates the existing window rather than creating a competing fullscreen interface.
 
@@ -52,11 +52,13 @@ See [Playnite alignment](docs/playnite-alignment.md) for the source comparison a
 
 ## Compatibility and limits
 
-Steam launches use the registered `steam://rungameid/` handler. Direct executable and emulator launches resolve Playnite profiles and Windows arguments. Direct launches use Windows shell execution and track the launched process tree. Steam uses newly started processes under the game installation directory and Steam's running-app state.
+Steam launches invoke the installed Steam client with `-silent "steam://rungameid/<id>"`, matching Playnite's Steam plugin without relying on Windows URL associations. Direct executable and emulator launches resolve Playnite profiles and Windows arguments. Direct launches use Windows shell execution and track the launched process tree. Steam uses newly started processes under the game installation directory and Steam's running-app state. Windows launch errors include their underlying error details.
 
 This is not full Playnite compatibility. Non-Steam store integrations, launch scripts, multi-action / multi-ROM selection, advanced custom tracking, library editing, achievements, downloads, and playtime writeback are not implemented. Unsupported actions produce an error. An emulator left running after its window closes may need to finish exiting or be closed before another instance can start; the launcher does not force-kill it.
 
 Trailers use bounded FFmpeg decoding at up to 1080p/30 fps. The default is two decoder/filter/output threads; `video_threads: 0` enables FFmpeg auto sizing. Artwork uses a bounded cache, and media stops on focus loss or game launch. Exact long-duration trailer audio/video synchronization has not been measured.
+
+Music and trailer audio use FFmpeg and a bounded SDL stereo queue. Music loops, and switching selections closes the previous output before starting another. `music_volume` is linear gain from 0 to 1 (default 0.5); existing normalized Playnite tracks are read without rewriting them. Quiet introductions retain their source dynamics. No microphone is used by the optional `tests/audio_probe.py` speaker-loopback loudness test.
 
 ## Verification
 

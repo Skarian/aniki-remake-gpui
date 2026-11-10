@@ -30,6 +30,47 @@ pub fn release(window: &Window) {
         }
     }
 }
+pub fn permit_game_activation() {
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+/// Remove the already-presented cover only when the game's window is stable.
+/// Do not move an unrelated foreground app out of the user's way.
+pub fn handoff(window: &Window, game: u64) {
+    let target = HWND(game as usize as *mut _);
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let mut game_pid = 0;
+        let mut foreground_pid = 0;
+        GetWindowThreadProcessId(target, Some(&mut game_pid));
+        GetWindowThreadProcessId(foreground, Some(&mut foreground_pid));
+        let activate = IsWindow(Some(target)).as_bool()
+            && (may_restore(window) || (game_pid != 0 && game_pid == foreground_pid));
+        // NOTOPMOST inserts the launcher at the top of the ordinary band. Do
+        // this first, then put the game above it even if it already has focus.
+        release(window);
+        if activate {
+            let other = GetWindowThreadProcessId(foreground, None);
+            let this = GetCurrentThreadId();
+            let attached =
+                other != 0 && other != this && AttachThreadInput(this, other, true).as_bool();
+            let _ = SetForegroundWindow(target);
+            let _ = SetWindowPos(
+                target,
+                Some(HWND_TOP),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
+            if attached {
+                let _ = AttachThreadInput(this, other, false);
+            }
+        }
+    }
+}
 /// Never reclaim focus over an unrelated application after a game exits.
 /// A normal game exit exposes our retained window, or briefly the shell.
 pub fn may_restore(window: &Window) -> bool {

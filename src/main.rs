@@ -187,6 +187,7 @@ impl Launcher {
             .and_then(|i| args.get(i + 1))
             .cloned()
             .unwrap_or_default();
+        let music = media::Music::new(base.join("SDL2.dll"), config.ffmpeg.clone());
         let mut launcher = Self {
             base,
             config,
@@ -201,7 +202,7 @@ impl Launcher {
             rx,
             refresh_paused,
             controller,
-            music: media::Music::new(),
+            music,
             video: None,
             video_frame: None,
             retired: Vec::new(),
@@ -502,6 +503,7 @@ impl Launcher {
                     self.refresh_paused.store(false, Ordering::Relaxed);
                 } else if let Some(session) = &mut self.session {
                     session.automatic_return = false;
+                    focus::release(window);
                 }
                 self.phase = Phase::Library;
                 self.reset_media();
@@ -864,6 +866,27 @@ impl Launcher {
             let events: Vec<_> = self.launch_rx.iter().flat_map(|rx| rx.try_iter()).collect();
             for event in events {
                 match event {
+                    launch::LaunchEvent::Ready(hwnd) => {
+                        if self.session.as_ref().is_some_and(|s| s.automatic_return) {
+                            focus::handoff(window, hwnd);
+                            log(
+                                &self.base,
+                                "focus_released",
+                                &focus::state(window),
+                                self.start,
+                            );
+                        }
+                        log(&self.base, "game_ready", &hwnd.to_string(), self.start);
+                    }
+                    launch::LaunchEvent::ReadinessExpired => {
+                        focus::release(window);
+                        log(
+                            &self.base,
+                            "readiness_timeout",
+                            "uncovered after 90 seconds; process tracking continues",
+                            self.start,
+                        );
+                    }
                     launch::LaunchEvent::Focused(_) => {
                         log(
                             &self.base,
@@ -1195,7 +1218,7 @@ impl Render for Launcher {
                     let entity = cx.entity().downgrade();
                     // Queued during render: GPUI processes this callback before
                     // the *following* frame, after this opaque scene is presented.
-                    window.on_next_frame(move |window, cx| {
+                    window.on_next_frame(move |_window, cx| {
                         let _ = entity.update(cx, |this, cx| {
                             if this.launch_generation != generation {
                                 return;
@@ -1206,17 +1229,11 @@ impl Render for Launcher {
                             let Some(tx) = session.pending.take() else {
                                 return;
                             };
-                            focus::release(window);
+                            focus::permit_game_activation();
                             log(
                                 &this.base,
                                 "status_presented",
                                 "dispatching game",
-                                this.start,
-                            );
-                            log(
-                                &this.base,
-                                "focus_released",
-                                &focus::state(window),
                                 this.start,
                             );
                             launch::start(session.game.launch.clone(), tx);
@@ -1853,7 +1870,13 @@ fn main() {
     }
     let config: Config = fs::read(base.join("aniki-remake-gpui.json"))
         .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
+        .and_then(|b| match Config::parse(&b) {
+            Ok(config) => Some(config),
+            Err(error) => {
+                log(&base, "config_error", &error.to_string(), start);
+                None
+            }
+        })
         .unwrap_or_default();
     let args: Vec<String> = std::env::args().collect();
     let fixture = args.iter().any(|a| a == "--fixture-game");

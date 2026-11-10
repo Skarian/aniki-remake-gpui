@@ -41,6 +41,15 @@ def events():
     if not log.exists(): return []
     return [json.loads(s) for s in log.read_text(encoding='utf-8').splitlines(keepends=True) if s.endswith('\n')]
 
+def visible_order():
+    order=[]
+    @cbtype
+    def visit(hwnd,_):
+        if u.IsWindowVisible(hwnd): order.append(hwnd)
+        return True
+    u.EnumWindows(visit,None)
+    return order
+
 def wait(predicate,timeout=20):
     end=time.monotonic()+timeout
     while time.monotonic()<end:
@@ -61,7 +70,7 @@ if '--artwork-from-cache' in sys.argv:
     cached=json.loads((root/'cache/library.json').read_text(encoding='utf-8-sig'))
     source=next(g for g in cached['games'] if all(g.get(k) and Path(g[k]).is_file() for k in ('background','logo','cover')))
     artwork={k:source[k] for k in ('background','logo','cover')}
-for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]:
+for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbox','fullscreen'),('xbox','noactivate'),('xbox','exit'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]:
     if log.exists(): log.rename(app/'artifacts'/f'session-{time.time_ns()}.jsonl')
     marker=app/f'{family}-{mode}.hwnd'
     marker.unlink(missing_ok=True); Path(str(marker)+'.transition').unlink(missing_ok=True)
@@ -112,12 +121,20 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','exit'),('xbox',
             press('back');assert page(events())=='details'
         for cycle in range(0 if mode=='missing' else 2 if mode=='exit' else 1):
             press('accept')
-            rows=wait(lambda r:sum(e['event']=='game_focused' for e in r)==cycle+1)
+            if mode=='delayed':
+                wait(lambda r:any(e['event']=='game_started' for e in r))
+                assert u.GetWindowLongW(hwnd,-20)&0x8,'Launcher uncovered during splash'
+                assert not any(e['event']=='focus_released' for e in events())
+            rows=wait(lambda r:sum(e['event']=='game_focused' for e in r)==cycle+1 and sum(e['event']=='focus_released' for e in r)==cycle+1)
+            if mode=='delayed':
+                assert Path(str(marker)+'.ready').exists(),'Splash was mistaken for ready game'
             assert owner.poll() is None and u.IsWindow(hwnd) and not u.IsIconic(hwnd)
             assert u.IsWindowVisible(hwnd)
             assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Launcher stayed topmost over game'
             game_hwnd=int(marker.read_text())
             assert u.GetForegroundWindow()==game_hwnd
+            order=visible_order()
+            assert order.index(game_hwnd)<order.index(hwnd),'Foreground game is occluded by launcher'
             launches=[e for e in rows if e['event'] in ('status_presented','game_started')]
             assert [e['event'] for e in launches[-2:]]==['status_presented','game_started']
             wait(lambda r:page(r)=='running')

@@ -74,11 +74,16 @@ impl Default for Config {
             fullscreen: true,
             music: true,
             video: true,
-            music_volume: 0.25,
+            music_volume: 0.5,
             video_delay_ms: 1500,
             ffmpeg: String::new(),
             video_threads: 2,
         }
+    }
+}
+impl Config {
+    pub fn parse(bytes: &[u8]) -> serde_json::Result<Self> {
+        serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
     }
 }
 pub fn text(v: &Value) -> String {
@@ -757,6 +762,14 @@ pub fn start_refresh(base: PathBuf, config: Config, tx: Sender<Update>, paused: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_utf8_bom_preserves_media_configuration() {
+        let c = Config::parse(b"\xef\xbb\xbf{\"ffmpeg\":\"ffmpeg.exe\",\"music_volume\":0.85}")
+            .unwrap();
+        assert_eq!(c.ffmpeg, "ffmpeg.exe");
+        assert_eq!(c.music_volume, 0.85);
+        assert!(Config::parse(b"broken").is_err());
+    }
     use serde_json::json;
     // Translated from Playnite source/Tests/Playnite.Tests/Models/GameTests.cs (MIT).
     #[test]

@@ -131,36 +131,42 @@ pub struct Music {
     pub status: mpsc::Receiver<String>,
 }
 impl Music {
-    pub fn new() -> Self {
+    pub fn new(sdl: std::path::PathBuf, ffmpeg: String) -> Self {
         let (tx, rx) = mpsc::channel::<(String, u32)>();
         let (status_tx, status) = mpsc::channel();
         thread::spawn(move || {
-            fn send(command: &str) -> u32 {
-                let wide: Vec<u16> = command.encode_utf16().chain(Some(0)).collect();
-                unsafe {
-                    windows::Win32::Media::Multimedia::mciSendStringW(
-                        windows::core::PCWSTR(wide.as_ptr()),
-                        None,
-                        None,
-                    )
+            let mut audio: Option<TrailerAudio> = None;
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(25)) {
+                    Ok((mut path, mut volume)) => {
+                        while let Ok((p, v)) = rx.try_recv() {
+                            path = p;
+                            volume = v;
+                        }
+                        // Close the old SDL queue before opening another track.
+                        drop(audio.take());
+                        if !path.is_empty() {
+                            audio = TrailerAudio::open(
+                                &sdl,
+                                &ffmpeg,
+                                &path,
+                                true,
+                                volume as f32 / 1000.,
+                            );
+                            if audio.is_none() {
+                                let _ = status_tx.send("Music decoder could not start".into());
+                            }
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                if let Some(audio) = &audio {
+                    while let Ok(message) = audio.status.try_recv() {
+                        let _ = status_tx.send(message.into());
+                    }
                 }
             }
-            while let Ok((mut path, mut volume)) = rx.recv() {
-                while let Ok((p, v)) = rx.try_recv() {
-                    path = p;
-                    volume = v;
-                }
-                send("close lumen_music");
-                if !path.is_empty() && !path.contains('"') {
-                    let opened = send(&format!("open \"{path}\" type mpegvideo alias lumen_music"));
-                    let volume_result = send(&format!("setaudio lumen_music volume to {volume}"));
-                    let played = send("play lumen_music repeat");
-                    let _ = status_tx.send(format!(
-                        "open={opened}; volume={volume_result}; play={played}"
-                    ));
-                }
-            }
-            send("close lumen_music");
         });
         Self { tx, status }
     }
@@ -174,7 +180,7 @@ impl Music {
     }
 }
 
-// Audio for the explicit trailer view only. The existing SDL runtime owns a
+// Audio for music and the explicit trailer view. The existing SDL runtime owns a
 // bounded PCM queue; no player window, audio transcode cache, or startup work.
 pub struct TrailerAudio {
     child: Child,
@@ -196,14 +202,29 @@ struct AudioSpec {
 }
 impl TrailerAudio {
     pub fn start(sdl: &Path, ffmpeg: &str, path: &str) -> Option<Self> {
+        Self::open(sdl, ffmpeg, path, false, 1.)
+    }
+    fn open(sdl: &Path, ffmpeg: &str, path: &str, looping: bool, volume: f32) -> Option<Self> {
+        if !Path::new(path).is_file() {
+            return None;
+        }
+        let gain = format!("volume={}", volume.clamp(0., 1.));
         let mut child = Command::new(ffmpeg)
             .args([
                 "-hide_banner",
                 "-loglevel",
                 "error",
+                "-stream_loop",
+                if looping { "-1" } else { "0" },
+                "-threads",
+                "1",
                 "-i",
                 path,
                 "-vn",
+                "-filter_threads",
+                "1",
+                "-af",
+                &gain,
                 "-ac",
                 "2",
                 "-ar",
@@ -258,6 +279,7 @@ impl TrailerAudio {
                 let queued = symbol!("SDL_GetQueuedAudioSize", unsafe extern "C" fn(u32) -> u32);
                 let pause = symbol!("SDL_PauseAudioDevice", unsafe extern "C" fn(u32, i32));
                 if init(0x10) != 0 {
+                    let _ = status_tx.send("SDL audio initialization failed");
                     return;
                 }
                 let spec = AudioSpec {
@@ -273,6 +295,7 @@ impl TrailerAudio {
                 };
                 let device = open(std::ptr::null(), 0, &spec, std::ptr::null_mut(), 0);
                 if device == 0 {
+                    let _ = status_tx.send("SDL audio output could not open");
                     quit(0x10);
                     return;
                 }
@@ -306,6 +329,9 @@ impl TrailerAudio {
                 }
                 while queued(device) > 0 && !stopped.load(Ordering::Relaxed) {
                     thread::sleep(std::time::Duration::from_millis(4));
+                }
+                if !reported {
+                    let _ = status_tx.send("Audio decoder produced no samples");
                 }
                 close(device);
                 quit(0x10);
