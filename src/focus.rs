@@ -82,18 +82,19 @@ pub fn restore(handle: usize) {
             if IsIconic(h).as_bool() {
                 let _ = ShowWindow(h, SW_RESTORE);
             }
+            position(h, HWND_NOTOPMOST, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            if !SetForegroundWindow(h).as_bool() {
+                for band in [HWND_TOPMOST, HWND_NOTOPMOST] {
+                    position(h, band, SET_WINDOW_POS_FLAGS::default());
+                }
+            }
+            // Playnite attaches after activation, then raises in the normal band.
             let foreground = GetForegroundWindow();
             let other = GetWindowThreadProcessId(foreground, None);
             let this = GetCurrentThreadId();
             let attached =
                 other != 0 && other != this && AttachThreadInput(this, other, true).as_bool();
-            position(h, HWND_NOTOPMOST, SWP_SHOWWINDOW);
-            if !SetForegroundWindow(h).as_bool() {
-                for band in [HWND_TOPMOST, HWND_NOTOPMOST] {
-                    position(h, band, SET_WINDOW_POS_FLAGS::default());
-                }
-                let _ = BringWindowToTop(h);
-            }
+            position(h, HWND_TOP, SWP_SHOWWINDOW);
             let _ = SetActiveWindow(h);
             let _ = SetFocus(Some(h));
             if attached {
