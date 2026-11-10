@@ -1,15 +1,34 @@
 ﻿"""Retained-window lifecycle regression: real windows, virtual Xbox and DS4.
 No personal library is needed. Owns only artifacts/retained-window/fixture.
 """
-import ctypes as c, json, shutil, subprocess, sys, time
+import argparse, ctypes as c, hashlib, json, shutil, subprocess, sys, time
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(root/'.tools/python'))
 import vgamepad as vg
-app=root/'artifacts/retained-window/fixture'
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--exe',type=Path,default=root/'target/release/aniki-remake-gpui.exe')
+parser.add_argument('--expected-sha256',required=True,help='Hash recorded after the intended build')
+parser.add_argument('--label',default='candidate')
+parser.add_argument('--modes',help='Comma-separated mode or controller:mode selections')
+parser.add_argument('--artwork-from-cache',action='store_true')
+parser.add_argument('--foreground-setup',action='store_true',help='Allow explicit initial activation; does not certify automatic startup')
+args=parser.parse_args()
+binary=args.exe.resolve()
+digest=hashlib.sha256(binary.read_bytes()).hexdigest()
+if digest.lower()!=args.expected_sha256.lower(): raise SystemExit('Executable does not match the intended build hash')
+app=root/'artifacts/retained-window'/f'run-{time.time_ns()}'/'fixture'
 app.mkdir(parents=True,exist_ok=True)
 for d in ('cache','artifacts'): (app/d).mkdir(exist_ok=True)
-shutil.copy2(root/'target/release/aniki-remake-gpui.exe',app/'aniki-remake-gpui.exe')
+revision=subprocess.check_output(['git','-c',f'safe.directory={root.as_posix()}','rev-parse','HEAD'],cwd=root,text=True).strip()
+dirty=subprocess.check_output(['git','-c',f'safe.directory={root.as_posix()}','status','--porcelain'],cwd=root,text=True)
+report=dict(label=args.label,exe=str(binary),sha256=digest,head=revision,worktree_status=dirty,status='setup',cases=[])
+report['initial_foreground']='explicit setup' if args.foreground_setup else 'automatic'
+result_path=app.parent/'results.json'
+result_path.write_text(json.dumps(report,indent=2))
+print(f'Results: {result_path}',flush=True)
+shutil.copy2(binary,app/'aniki-remake-gpui.exe')
+assert hashlib.sha256((app/'aniki-remake-gpui.exe').read_bytes()).hexdigest()==digest
 shutil.copy2(root/'SDL2.dll',app/'SDL2.dll')
 shutil.copytree(root/'assets',app/'assets',dirs_exist_ok=True)
 subprocess.run([r'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe','/nologo','/target:winexe','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/out:'+str(app/'WindowFixture.exe'),str(root/'tests/WindowFixture.cs')],check=True)
@@ -64,17 +83,25 @@ def page(rows):
     frames=[json.loads(e['detail']) for e in rows if e['event']=='motion_frame']
     return frames[-1]['page'] if frames else None
 
-results=[]
+results=report['cases']
 artwork={}
-if '--artwork-from-cache' in sys.argv:
+if args.artwork_from_cache:
     cached=json.loads((root/'cache/library.json').read_text(encoding='utf-8-sig'))
     source=next(g for g in cached['games'] if all(g.get(k) and Path(g[k]).is_file() for k in ('background','logo','cover')))
     artwork={k:source[k] for k in ('background','logo','cover')}
-for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbox','fullscreen'),('xbox','noactivate'),('xbox','exit'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]:
+cases=[('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbox','fullscreen'),('xbox','noactivate'),('xbox','exit'),('xbox','minimized-return'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]
+if args.modes:
+    requested=set(args.modes.split(','))
+    available={mode for _,mode in cases}|{f'{family}:{mode}' for family,mode in cases}
+    if requested-available: raise SystemExit(f'Unknown cases: {requested-available}')
+    cases=[(family,mode) for family,mode in cases if mode in requested or f'{family}:{mode}' in requested]
+report['requested_cases']=[f'{family}:{mode}' for family,mode in cases]
+report['status']='running'
+for family,mode in cases:
     if log.exists(): log.rename(app/'artifacts'/f'session-{time.time_ns()}.jsonl')
     marker=app/f'{family}-{mode}.hwnd'
-    marker.unlink(missing_ok=True); Path(str(marker)+'.transition').unlink(missing_ok=True)
-    fixture_mode='exit' if mode.startswith('held-') else mode
+    for suffix in ('','.transition','.ready'): Path(str(marker)+suffix).unlink(missing_ok=True)
+    fixture_mode='exit' if mode.startswith('held-') or mode=='minimized-return' else mode
     game=dict(id='fixture',name='Lifecycle fixture',platform='PC',launch=dict(kind='process',executable=str(app/'WindowFixture.exe'),arguments=f'{fixture_mode} "{marker}"',working_dir=str(app),install_dir=str(app)))
     game.update(artwork)
     if mode=='missing': game['launch']['executable']=str(app/'MissingGame.exe')
@@ -95,7 +122,8 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbo
         own=[w for w in windows() if w[1]==owner.pid]
         assert len(own)==1,own
         hwnd=own[0][0]
-        wait(lambda _:u.GetForegroundWindow()==hwnd)
+        if args.foreground_setup: print(f'Foreground setup: pid={owner.pid} hwnd={hwnd}',flush=True)
+        wait(lambda _:u.GetForegroundWindow()==hwnd,timeout=90 if args.foreground_setup else 20)
         expected_kind='PlayStation' if family=='ps' else 'Xbox'
         wait(lambda r:any(e['event']=='controller' and f'connected=true;kind={expected_kind}' in e['detail'] for e in r))
         # Enumeration is asynchronous; the app must observe a neutral sample
@@ -111,8 +139,9 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbo
             results.append(dict(controller=family,mode=mode,passed=True,followers_released=True))
             print(json.dumps(results[-1]),flush=True)
             continue
+        wait(lambda r:page(r)=='home')
         press('accept',.7)
-        assert page(events())=='details'
+        wait(lambda r:page(r)=='details')
         if mode=='missing':
             press('accept')
             wait(lambda r:any(e['event']=='launch_failed' for e in r) and page(r)=='error')
@@ -120,12 +149,19 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbo
             assert not u.IsIconic(hwnd)
             press('back');assert page(events())=='details'
         for cycle in range(0 if mode=='missing' else 2 if mode=='exit' else 1):
+            assert page(events())=='details','Play requires the Details page'
             press('accept')
             if mode=='delayed':
                 wait(lambda r:any(e['event']=='game_started' for e in r))
                 assert u.GetWindowLongW(hwnd,-20)&0x8,'Launcher uncovered during splash'
-                assert not any(e['event']=='focus_released' for e in events())
-            rows=wait(lambda r:sum(e['event']=='game_focused' for e in r)==cycle+1 and sum(e['event']=='focus_released' for e in r)==cycle+1)
+                # A stale marker cannot pass this run, and the assertion is made
+                # throughout the splash rather than only after eventual handoff.
+                def splash_ready(rows):
+                    if Path(str(marker)+'.ready').exists(): return True
+                    assert not any(e['event']=='focus_released' for e in rows),'Handoff preceded fixture readiness'
+                    return False
+                wait(splash_ready)
+            rows=wait(lambda r:sum(e['event']=='focus_released' for e in r)==cycle+1)
             if mode=='delayed':
                 assert Path(str(marker)+'.ready').exists(),'Splash was mistaken for ready game'
             assert owner.poll() is None and u.IsWindow(hwnd) and not u.IsIconic(hwnd)
@@ -138,6 +174,9 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbo
             launches=[e for e in rows if e['event'] in ('status_presented','game_started')]
             assert [e['event'] for e in launches[-2:]]==['status_presented','game_started']
             wait(lambda r:page(r)=='running')
+            if mode=='minimized-return':
+                u.ShowWindow(c.c_void_p(hwnd),6)
+                wait(lambda _:u.IsIconic(hwnd))
             if mode.startswith('held-'):
                 pad.press_button(button=buttons[mode.removeprefix('held-')]);pad.update()
             assert not any(w[2]=='AnikiSessionBlack' for w in windows())
@@ -182,6 +221,10 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbo
         assert not u.IsWindow(hwnd)
         results.append(dict(controller=family,mode=mode,passed=True,same_process=True,same_window=True,no_black_cover=True))
         print(json.dumps(results[-1]),flush=True)
+    except BaseException as error:
+        results.append(dict(controller=family,mode=mode,passed=False,error=f'{type(error).__name__}: {error}'))
+        report['status']='failed'
+        raise
     finally:
         pad.reset();pad.update()
         if handle:k.TerminateProcess(handle,0);k.CloseHandle(handle)
@@ -190,4 +233,6 @@ for family,mode in [('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbo
             if f.poll() is None:f.terminate();f.wait(timeout=5)
         output.close()
         time.sleep(.5)
-        (app.parent/'results.json').write_text(json.dumps(results,indent=2))
+        result_path.write_text(json.dumps(report,indent=2))
+report['status']='passed'
+result_path.write_text(json.dumps(report,indent=2))

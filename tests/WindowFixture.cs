@@ -18,7 +18,7 @@ class WindowFixture {
         if(mode == "fullscreen") { form.FormBorderStyle = FormBorderStyle.None; form.WindowState = FormWindowState.Maximized; }
         if(mode == "delayed") {
             form.Text = "Game splash";
-            var ready = new Timer { Interval = 1700 };
+            var ready = new Timer { Interval = 5000 };
             ready.Tick += (s,e) => { ready.Stop(); form.Text = "Aniki lifecycle fixture"; File.WriteAllText(output + ".ready", "ready"); };
             ready.Start();
         }
@@ -27,7 +27,7 @@ class WindowFixture {
             File.WriteAllText(output, form.Handle.ToInt64().ToString());
             if(mode != "noactivate") { form.Activate(); SetForegroundWindow(form.Handle); }
         };
-        var timer = new Timer { Interval = mode == "delayed" ? 8000 : 5000 };
+        var timer = new Timer { Interval = mode == "delayed" ? 11000 : 5000 };
         timer.Tick += (s,e) => {
             timer.Stop();
             if(mode == "game-crash") Environment.Exit(7);
