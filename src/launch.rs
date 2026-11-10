@@ -191,6 +191,14 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 struct StartedProcess(HANDLE);
+impl StartedProcess {
+    fn pid(&self) -> Result<u32, String> {
+        let pid = unsafe { GetProcessId(self.0) };
+        (pid != 0)
+            .then_some(pid)
+            .ok_or_else(|| "The launch returned no trackable process.".into())
+    }
+}
 impl Drop for StartedProcess {
     fn drop(&mut self) {
         unsafe {
@@ -312,8 +320,19 @@ impl Drop for ShellApartment {
         unsafe { CoUninitialize() };
     }
 }
+#[derive(Default)]
+struct TrackingFailures(u8);
+impl TrackingFailures {
+    fn observe(&mut self, success: bool) -> bool {
+        self.0 = if success { 0 } else { self.0 + 1 };
+        self.0 >= 5
+    }
+}
 pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>, cancel: Arc<AtomicBool>) {
     std::thread::spawn(move || {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         let fail = |message: String| {
             let _ = tx.send(LaunchEvent::Failed(message));
         };
@@ -386,11 +405,13 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>, cancel: Arc<AtomicBool>)
             }
             match start_process(&plan) {
                 Ok(c) => {
-                    let pid = unsafe { GetProcessId(c.0) };
-                    if pid == 0 {
-                        fail("The launch returned no trackable process.".into());
-                        return;
-                    }
+                    let pid = match c.pid() {
+                        Ok(pid) => pid,
+                        Err(error) => {
+                            fail(error);
+                            return;
+                        }
+                    };
                     tracked.insert(pid);
                     let _ = tx.send(LaunchEvent::Started);
                     _child = Some(c)
@@ -409,7 +430,7 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>, cancel: Arc<AtomicBool>)
         let mut uncovered = false;
         let mut expired = false;
         let mut next_lifecycle = clock;
-        let mut failures = 0;
+        let mut failures = TrackingFailures::default();
         let mut readiness = Readiness::default();
         let mut gone = 0u8;
         let install = plan
@@ -433,15 +454,12 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>, cancel: Arc<AtomicBool>)
             let live = match processes() {
                 Ok(live) => {
                     if lifecycle {
-                        failures = 0;
+                        failures.observe(true);
                     }
                     live
                 }
                 Err(error) => {
-                    if lifecycle {
-                        failures += 1;
-                    }
-                    if failures >= 5 {
+                    if lifecycle && failures.observe(false) {
                         fail(format!(
                             "Process tracking failed; the game is now untracked: {error}"
                         ));
@@ -516,6 +534,51 @@ fn end_observation_allowed(steam: bool, uncovered: bool, elapsed: Duration) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_worker_exits_before_preflight_or_dispatch() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        start(
+            LaunchPlan {
+                error: "must not be dispatched".into(),
+                ..Default::default()
+            },
+            tx,
+            Arc::new(AtomicBool::new(true)),
+        );
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
+    #[test]
+    fn snapshot_failure_is_unknown_until_five_consecutive_observations() {
+        let mut failures = TrackingFailures::default();
+        for _ in 0..4 {
+            assert!(!failures.observe(false));
+        }
+        assert!(!failures.observe(true));
+        for _ in 0..4 {
+            assert!(!failures.observe(false));
+        }
+        assert!(failures.observe(false));
+    }
+    #[test]
+    fn missing_process_handle_cannot_seed_a_system_process_tree() {
+        assert!(StartedProcess(HANDLE::default()).pid().is_err());
+    }
+    #[test]
+    fn native_membership_survives_an_unknown_image_path() {
+        let mut tracked = HashSet::from([10]);
+        descendants(
+            &[Process {
+                pid: 10,
+                parent: 9,
+                path: String::new(),
+            }],
+            &mut tracked,
+        );
+        assert_eq!(tracked, HashSet::from([10]));
+    }
     #[test]
     fn steam_bootstrap_gap_is_not_a_completed_game_session() {
         assert!(!end_observation_allowed(

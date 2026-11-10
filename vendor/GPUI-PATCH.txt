@@ -4,7 +4,8 @@ Original license: gpui/LICENSE-APACHE.
 Local changes, 2026-11-09:
 - Launcher windows disable Windows show/hide animations before first display
   (ANIKI_DISABLE_WINDOW_ANIMATIONS environment flag). The same window stays
-  alive and is minimized/restored across game sessions; there is no cover.
+  alive across game sessions. Its own status scene covers game startup and
+  remains beneath gameplay; normal game launching does not minimize it.
 - Windows SIZE_MINIMIZED reduces DirectX rendering surfaces to 1x1 while
   preserving the window's logical bounds. Restoring always resizes the renderer
   to the actual client size and restores its frame-request callback.
@@ -17,9 +18,10 @@ Local changes, 2026-11-09:
   Only slot-0 texture bindings are cleared; other pipeline state is preserved.
   Reference: https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_3/nf-dxgi1_3-idxgidevice3-trim
 
-Purpose: Keep the launcher window alive while reducing in-game renderer memory.
-Minimization releases media/artwork and reduces swap-chain surfaces. Restore
-rebuilds the surfaces for the same HWND and resumes the existing Details page.
+Purpose: Keep the launcher window alive and release resources safely. Explicit
+minimization reduces swap-chain surfaces; normal gameplay retains that surface
+and releases media and unrelated artwork. Restore rebuilds minimized surfaces
+for the same HWND and resumes the existing Details page.
 
 No atlas allocator changes, rendering-quality changes, or video backend rewrite.
 The app's foreground-restore path reveals the prepared UI when the game exits.

@@ -896,7 +896,25 @@ impl Launcher {
         }
         let mut finished = false;
         {
-            let events: Vec<_> = self.launch_rx.iter().flat_map(|rx| rx.try_iter()).collect();
+            let mut events = Vec::new();
+            if let Some(rx) = &self.launch_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => events.push(event),
+                        Err(error) => {
+                            if error == mpsc::TryRecvError::Disconnected
+                                && events.is_empty()
+                                && self.session.as_ref().is_some_and(|s| !s.ended)
+                            {
+                                events.push(launch::LaunchEvent::Failed(
+                                    "Game tracking disconnected; the game is now untracked.".into(),
+                                ));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             let terminal = events.iter().any(|event| {
                 matches!(
                     event,
