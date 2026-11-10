@@ -174,18 +174,9 @@ pub fn descendants(live: &[Process], tracked: &mut HashSet<u32>) {
     // Keeping dead parents forever can adopt unrelated processes after PID reuse.
     tracked.retain(|pid| live.iter().any(|p| p.pid == *pid));
 }
-fn matches_game(
-    p: &Process,
-    tracked: &HashSet<u32>,
-    baseline: &HashSet<u32>,
-    steam: bool,
-    install: &str,
-) -> bool {
+fn matches_game(p: &Process, tracked: &HashSet<u32>, steam: bool, install: &str) -> bool {
     tracked.contains(&p.pid)
-        || (steam
-            && !baseline.contains(&p.pid)
-            && install.len() > 3
-            && p.path.to_lowercase().starts_with(install))
+        || (steam && install.len() > 3 && p.path.to_lowercase().starts_with(install))
 }
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -237,24 +228,6 @@ fn start_process(plan: &LaunchPlan) -> windows::core::Result<StartedProcess> {
     }
     Ok(StartedProcess(info.hProcess))
 }
-fn steam_running(app: &str) -> bool {
-    unsafe {
-        let key = wide(&format!(r"Software\Valve\Steam\Apps\{app}"));
-        let mut value = 0u32;
-        let mut size = 4u32;
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            PCWSTR(key.as_ptr()),
-            w!("Running"),
-            RRF_RT_REG_DWORD,
-            None,
-            Some((&mut value as *mut u32).cast()),
-            Some(&mut size),
-        )
-        .is_ok()
-            && value != 0
-    }
-}
 fn registry_string(root: HKEY, key: &str, name: &str) -> Option<String> {
     let key = wide(key);
     let name = wide(name);
@@ -276,32 +249,10 @@ fn registry_string(root: HKEY, key: &str, name: &str) -> Option<String> {
     let len = buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len());
     Some(String::from_utf16_lossy(&buffer[..len]))
 }
-fn steam_client(live: &[Process]) -> Option<String> {
-    let registered = registry_string(HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamExe")
-        .into_iter()
-        .chain(
-            [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]
-                .into_iter()
-                .filter_map(|key| {
-                    registry_string(HKEY_LOCAL_MACHINE, key, "InstallPath").map(|path| {
-                        Path::new(&path)
-                            .join("steam.exe")
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                }),
-        );
-    registered
-        .chain(
-            live.iter()
-                .filter(|p| {
-                    Path::new(&p.path).file_name().is_some_and(|name| {
-                        name.to_string_lossy().eq_ignore_ascii_case("steam.exe")
-                    })
-                })
-                .map(|p| p.path.clone()),
-        )
-        .find(|path| Path::new(path).is_file())
+fn steam_client() -> Option<String> {
+    let path = registry_string(HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath")?;
+    let exe = Path::new(&path).join("steam.exe");
+    exe.is_file().then(|| exe.to_string_lossy().into_owned())
 }
 fn steam_plan(client: String, app: &str) -> Result<LaunchPlan, String> {
     if app.is_empty() || !app.bytes().all(|b| b.is_ascii_digit()) || app.parse::<u64>().is_err() {
@@ -330,205 +281,133 @@ impl TrackingFailures {
 }
 pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>, cancel: Arc<AtomicBool>) {
     std::thread::spawn(move || {
-        if cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let fail = |message: String| {
+        if let Err(message) = run(&plan, &tx, &cancel) {
             let _ = tx.send(LaunchEvent::Failed(message));
-        };
-        if !plan.error.is_empty() {
-            fail(plan.error);
-            return;
-        }
-        // Shell execution can invoke COM handlers. Each launch worker needs its
-        // own apartment, independent of GPUI's UI thread initialization.
-        if let Err(error) =
-            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.ok()
-        {
-            fail(format!(
-                "Could not initialize Windows launch services: {error}"
-            ));
-            return;
-        }
-        let _apartment = ShellApartment;
-        let before = match processes() {
-            Ok(live) => live,
-            Err(error) => {
-                fail(format!("Could not inspect running processes: {error}"));
-                return;
-            }
-        };
-        let baseline: HashSet<u32> = before.iter().map(|p| p.pid).collect();
-        let mut tracked = HashSet::new();
-        let mut _child: Option<StartedProcess> = None;
-        if plan.kind == "steam" {
-            // Match Playnite's SteamPlayController: invoke the Steam executable
-            // directly with its URI, rather than relying on a URL association.
-            let Some(client) = steam_client(&before) else {
-                fail("Steam's executable could not be found. Open Steam and try again.".into());
-                return;
-            };
-            let launch = match steam_plan(client, &plan.steam_id) {
-                Ok(launch) => launch,
-                Err(error) => {
-                    fail(error);
-                    return;
-                }
-            };
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            match start_process(&launch) {
-                Ok(child) => _child = Some(child),
-                Err(error) => {
-                    fail(format!(
-                        "Steam could not launch app {}: {error} (client: {})",
-                        plan.steam_id, launch.executable
-                    ));
-                    return;
-                }
-            }
-        } else if plan.kind == "process" {
-            if !Path::new(&plan.executable).is_file() {
-                fail(format!("Executable not found: {}", plan.executable));
-                return;
-            }
-            if before
-                .iter()
-                .any(|p| p.path.eq_ignore_ascii_case(&plan.executable))
-            {
-                fail("This emulator or game is already running. Close it before starting another session.".into());
-                return;
-            }
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
-            match start_process(&plan) {
-                Ok(c) => {
-                    let pid = match c.pid() {
-                        Ok(pid) => pid,
-                        Err(error) => {
-                            fail(error);
-                            return;
-                        }
-                    };
-                    tracked.insert(pid);
-                    let _ = tx.send(LaunchEvent::Started);
-                    _child = Some(c)
-                }
-                Err(e) => {
-                    fail(e.to_string());
-                    return;
-                }
-            }
-        } else {
-            fail("No supported launch action".into());
-            return;
-        }
-        let clock = Instant::now();
-        let mut started = plan.kind == "process";
-        let mut uncovered = false;
-        let mut expired = false;
-        let mut next_lifecycle = clock;
-        let mut failures = TrackingFailures::default();
-        let mut readiness = Readiness::default();
-        let mut gone = 0u8;
-        let install = plan
-            .install_dir
-            .trim_end_matches(['\\', '/'])
-            .to_lowercase()
-            + "\\";
-        loop {
-            // Kept Steam fusion retains its original sleep-first cadence.
-            if plan.kind == "steam" {
-                std::thread::sleep(Duration::from_millis(350));
-            }
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            let now = Instant::now();
-            let lifecycle = plan.kind == "steam" || now >= next_lifecycle;
-            if lifecycle {
-                next_lifecycle = now + Duration::from_secs(2);
-            }
-            let live = match processes() {
-                Ok(live) => {
-                    if lifecycle {
-                        failures.observe(true);
-                    }
-                    live
-                }
-                Err(error) => {
-                    if lifecycle && failures.observe(false) {
-                        fail(format!(
-                            "Process tracking failed; the game is now untracked: {error}"
-                        ));
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(350));
-                    continue;
-                }
-            };
-            descendants(&live, &mut tracked);
-            let game_pids: HashSet<u32> = live
-                .iter()
-                .filter(|p| matches_game(p, &tracked, &baseline, plan.kind == "steam", &install))
-                .map(|p| p.pid)
-                .collect();
-            let matched = !game_pids.is_empty();
-            let active = matched || (plan.kind == "steam" && steam_running(&plan.steam_id));
-            if !uncovered {
-                if let Some(hwnd) = readiness.update(ready_window(&game_pids), Instant::now()) {
-                    uncovered = true;
-                    let _ = tx.send(LaunchEvent::Ready(hwnd));
-                } else if !expired && clock.elapsed() > Duration::from_secs(90) {
-                    expired = true;
-                    let _ = tx.send(LaunchEvent::ReadinessExpired);
-                }
-            }
-            if lifecycle && active {
-                gone = 0;
-                if !started {
-                    started = true;
-                    let _ = tx.send(LaunchEvent::Started);
-                }
-            } else if lifecycle
-                && !active
-                && started
-                && end_observation_allowed(
-                    plan.kind == "steam",
-                    uncovered || expired,
-                    clock.elapsed(),
-                )
-            {
-                gone += 1;
-                if plan.kind == "process" || gone >= 3 {
-                    let _ = tx.send(LaunchEvent::Ended);
-                    break;
-                }
-            } else if plan.kind == "steam"
-                && !active
-                && !started
-                && clock.elapsed() > Duration::from_secs(90)
-            {
-                fail("The game did not start within 90 seconds. Return to the library and try again.".into());
-                break;
-            }
-            if plan.kind != "steam" {
-                std::thread::sleep(if uncovered || expired {
-                    Duration::from_secs(2)
-                } else {
-                    Duration::from_millis(350)
-                });
-            }
         }
     });
 }
-
-// Steam bootstrap/anti-cheat processes can exit before the game process exists.
-// Keep the launch attempt alive until readiness or the existing startup deadline.
-fn end_observation_allowed(steam: bool, uncovered: bool, elapsed: Duration) -> bool {
-    !steam || uncovered || elapsed >= Duration::from_secs(90)
+fn run(plan: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    if !plan.error.is_empty() {
+        return Err(plan.error.clone());
+    }
+    // Shell handlers require an apartment on the dispatching worker.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }
+        .ok()
+        .map_err(|error| format!("Could not initialize Windows launch services: {error}"))?;
+    let _apartment = ShellApartment;
+    let steam = plan.kind == "steam";
+    let install = if steam {
+        let path = std::fs::canonicalize(&plan.install_dir)
+            .map_err(|error| format!("Game installation directory is unavailable: {error}"))?;
+        if !path.is_dir() {
+            return Err("Game installation path is not a directory.".into());
+        }
+        path.to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+            + "\\"
+    } else {
+        String::new()
+    };
+    let launch = if steam {
+        let client = steam_client()
+            .ok_or("Steam's executable could not be found. Open Steam and try again.")?;
+        steam_plan(client, &plan.steam_id)?
+    } else if plan.kind == "process" {
+        if !Path::new(&plan.executable).is_file() {
+            return Err(format!("Executable not found: {}", plan.executable));
+        }
+        let before =
+            processes().map_err(|error| format!("Could not inspect running processes: {error}"))?;
+        if before
+            .iter()
+            .any(|p| p.path.eq_ignore_ascii_case(&plan.executable))
+        {
+            return Err("This emulator or game is already running. Close it before starting another session.".into());
+        }
+        plan.clone()
+    } else {
+        return Err("No supported launch action".into());
+    };
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let child = start_process(&launch)
+        .map_err(|error| format!("Could not start {}: {error}", launch.executable))?;
+    let mut tracked = HashSet::new();
+    if !steam {
+        tracked.insert(child.pid()?);
+        let _ = tx.send(LaunchEvent::Started);
+    }
+    let clock = Instant::now();
+    let mut started = plan.kind == "process";
+    let mut uncovered = false;
+    let mut expired = false;
+    let mut next_lifecycle = clock;
+    let mut failures = TrackingFailures::default();
+    let mut readiness = Readiness::default();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let now = Instant::now();
+        let lifecycle = now >= next_lifecycle;
+        if lifecycle {
+            next_lifecycle = now + Duration::from_secs(2);
+        }
+        let live = match processes() {
+            Ok(live) => {
+                if lifecycle {
+                    failures.observe(true);
+                }
+                live
+            }
+            Err(error) => {
+                if lifecycle && failures.observe(false) {
+                    return Err(format!(
+                        "Process tracking failed; the game is now untracked: {error}"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(350));
+                continue;
+            }
+        };
+        descendants(&live, &mut tracked);
+        let game_pids: HashSet<u32> = live
+            .iter()
+            .filter(|p| matches_game(p, &tracked, steam, &install))
+            .map(|p| p.pid)
+            .collect();
+        let active = !game_pids.is_empty();
+        if !uncovered {
+            if let Some(hwnd) = readiness.update(ready_window(&game_pids), Instant::now()) {
+                uncovered = true;
+                let _ = tx.send(LaunchEvent::Ready(hwnd));
+            } else if !expired && clock.elapsed() > Duration::from_secs(90) {
+                expired = true;
+                let _ = tx.send(LaunchEvent::ReadinessExpired);
+            }
+        }
+        if lifecycle && active {
+            if !started {
+                started = true;
+                let _ = tx.send(LaunchEvent::Started);
+            }
+        } else if lifecycle && !active && started {
+            let _ = tx.send(LaunchEvent::Ended);
+            break;
+        }
+        std::thread::sleep(if uncovered || expired {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(350)
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -580,30 +459,6 @@ mod tests {
         assert_eq!(tracked, HashSet::from([10]));
     }
     #[test]
-    fn steam_bootstrap_gap_is_not_a_completed_game_session() {
-        assert!(!end_observation_allowed(
-            true,
-            false,
-            Duration::from_secs(5)
-        ));
-        assert!(!end_observation_allowed(
-            true,
-            false,
-            Duration::from_secs(89)
-        ));
-        assert!(end_observation_allowed(
-            true,
-            false,
-            Duration::from_secs(90)
-        ));
-        assert!(end_observation_allowed(true, true, Duration::from_secs(5)));
-        assert!(end_observation_allowed(
-            false,
-            false,
-            Duration::from_secs(5)
-        ));
-    }
-    #[test]
     fn replacement_and_disappearing_windows_restart_readiness() {
         let now = Instant::now();
         let mut r = Readiness::default();
@@ -637,17 +492,9 @@ mod tests {
             path: "c:\\games\\other.exe".into(),
         };
         let tracked = HashSet::from([10]);
-        let baseline = HashSet::new();
-        assert!(!matches_game(&p, &tracked, &baseline, false, "c:\\games\\"));
-        assert!(matches_game(&p, &tracked, &baseline, true, "c:\\games\\"));
-        assert!(!matches_game(
-            &p,
-            &tracked,
-            &HashSet::from([11]),
-            true,
-            "c:\\games\\"
-        ));
-        assert!(!matches_game(&p, &tracked, &baseline, true, "c:\\game\\"));
+        assert!(!matches_game(&p, &tracked, false, "c:\\games\\"));
+        assert!(matches_game(&p, &tracked, true, "c:\\games\\"));
+        assert!(!matches_game(&p, &tracked, true, "c:\\game\\"));
     }
     #[test]
     fn exited_ids_cannot_adopt_a_later_unrelated_process() {
