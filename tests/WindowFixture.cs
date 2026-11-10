@@ -13,12 +13,13 @@ class WindowFixture {
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
     [STAThread] static void Main(string[] args) {
         string mode = args[0], output = args[1];
+        if(mode == "immediate") return;
         Form form = mode == "noactivate" ? new PassiveForm() : new Form();
         form.Text = "Aniki lifecycle fixture"; form.Width = 900; form.Height = 600;
         if(mode == "fullscreen") { form.FormBorderStyle = FormBorderStyle.None; form.WindowState = FormWindowState.Maximized; }
-        if(mode == "delayed") {
+        if(mode == "delayed" || mode == "late") {
             form.Text = "Game splash";
-            var ready = new Timer { Interval = 5000 };
+            var ready = new Timer { Interval = mode == "late" ? 95000 : 5000 };
             ready.Tick += (s,e) => { ready.Stop(); form.Text = "Aniki lifecycle fixture"; File.WriteAllText(output + ".ready", "ready"); };
             ready.Start();
         }
@@ -27,11 +28,11 @@ class WindowFixture {
             File.WriteAllText(output, form.Handle.ToInt64().ToString());
             if(mode != "noactivate") { form.Activate(); SetForegroundWindow(form.Handle); }
         };
-        var timer = new Timer { Interval = mode == "delayed" ? 11000 : 5000 };
+        var timer = new Timer { Interval = mode == "late" ? 102000 : mode == "delayed" ? 11000 : 5000 };
         timer.Tick += (s,e) => {
             timer.Stop();
             if(mode == "game-crash") Environment.Exit(7);
-            if(mode == "exit" || mode == "delayed" || mode == "fullscreen" || mode == "noactivate") { form.Close(); Application.Exit(); }
+            if(mode == "exit" || mode == "delayed" || mode == "late" || mode == "fullscreen" || mode == "noactivate") { form.Close(); Application.Exit(); }
             else if(mode == "minimize") form.WindowState = FormWindowState.Minimized;
             else if(mode == "replace") {
                 form.Hide();

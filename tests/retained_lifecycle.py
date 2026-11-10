@@ -89,7 +89,7 @@ if args.artwork_from_cache:
     cached=json.loads((root/'cache/library.json').read_text(encoding='utf-8-sig'))
     source=next(g for g in cached['games'] if all(g.get(k) and Path(g[k]).is_file() for k in ('background','logo','cover')))
     artwork={k:source[k] for k in ('background','logo','cover')}
-cases=[('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbox','fullscreen'),('xbox','noactivate'),('xbox','exit'),('xbox','minimized-return'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]
+cases=[('xbox','immediate'),('xbox','late'),('xbox','crash'),('xbox','missing'),('xbox','delayed'),('xbox','fullscreen'),('xbox','noactivate'),('xbox','exit'),('xbox','minimized-return'),('xbox','close'),('xbox','game-crash'),('xbox','held-back'),('xbox','held-accept'),('ps','exit'),('ps','held-back'),('ps','held-accept')]
 if args.modes:
     requested=set(args.modes.split(','))
     available={mode for _,mode in cases}|{f'{family}:{mode}' for family,mode in cases}
@@ -147,10 +147,19 @@ for family,mode in cases:
             wait(lambda r:any(e['event']=='launch_failed' for e in r) and page(r)=='error')
             wait(lambda _:u.GetForegroundWindow()==hwnd)
             assert not u.IsIconic(hwnd)
+            assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Failed launch retained topmost'
             press('back');assert page(events())=='details'
         for cycle in range(0 if mode=='missing' else 2 if mode=='exit' else 1):
             assert page(events())=='details','Play requires the Details page'
             press('accept')
+            if mode=='immediate':
+                wait(lambda r:any(e['event']=='game_ended' for e in r) and page(r)=='details',timeout=8)
+                assert not any(e['event']=='launch_failed' for e in events())
+                assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Immediate exit retained topmost'
+                continue
+            if mode=='late':
+                wait(lambda r:any(e['event']=='readiness_timeout' for e in r),timeout=94)
+                assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Expiry retained topmost'
             if mode=='delayed':
                 wait(lambda r:any(e['event']=='game_started' for e in r))
                 assert u.GetWindowLongW(hwnd,-20)&0x8,'Launcher uncovered during splash'
@@ -205,6 +214,7 @@ for family,mode in cases:
                 pad.reset();pad.update();time.sleep(.2)
             wait(lambda _:u.GetForegroundWindow()==hwnd)
             assert u.IsWindow(hwnd) and not u.IsIconic(hwnd) and u.GetForegroundWindow()==hwnd
+            assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Return retained topmost'
             assert [w[0] for w in windows() if w[1]==owner.pid]==[hwnd]
             assert sum(e['event']=='snapshot_loaded' for e in rows)==1
         # Duplicate invocation while browsing activates this exact window.

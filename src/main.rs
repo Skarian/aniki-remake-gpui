@@ -366,7 +366,7 @@ impl Launcher {
         }
         cx.notify();
     }
-    fn launch(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.preview {
             self.details = false;
             self.phase = Phase::Launching;
@@ -392,6 +392,7 @@ impl Launcher {
         }
         self.reset_media();
         self.phase = Phase::Launching;
+        focus::cover(window);
         let (tx, rx) = mpsc::channel();
         self.launch_rx = Some(rx);
         self.launch_generation += 1;
@@ -423,7 +424,30 @@ impl Launcher {
         self.controller.require_release();
         self.keyboard_release = focus::action_keys_down();
     }
+    fn restore_focus(&self, window: &mut Window, cx: &mut Context<Self>, explicit: bool) {
+        let Some(hwnd) = focus::hwnd(window).map(|h| h.0 as usize) else {
+            return;
+        };
+        let generation = self.launch_generation;
+        window.focus(&self.focus);
+        cx.spawn(async move |this, cx| {
+            let eligible = this
+                .read_with(cx, |this, _| {
+                    this.launch_generation == generation && (explicit || this.launch_rx.is_none())
+                })
+                .unwrap_or(false);
+            if eligible {
+                // No entity or Window borrow is held during synchronous Win32 callbacks.
+                focus::restore(hwnd);
+                let _ = this.read_with(cx, |this, _| {
+                    log(&this.base, "native_restored", "", this.start)
+                });
+            }
+        })
+        .detach();
+    }
     fn finish_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let automatic = self.session.as_ref().is_some_and(|s| s.automatic_return);
         if let Some(session) = self.session.take() {
             if session.automatic_return {
                 if let Some(index) = self
@@ -444,12 +468,12 @@ impl Launcher {
             }
         }
         self.launch_rx = None;
+        focus::release(window);
         self.refresh_paused.store(false, Ordering::Relaxed);
         self.reset_media();
         self.guard_return_input();
-        if focus::may_restore(window) {
-            focus::restore(window);
-            window.focus(&self.focus);
+        if automatic {
+            self.restore_focus(window, cx, false);
         }
         log(
             &self.base,
@@ -501,7 +525,11 @@ impl Launcher {
                 || matches!(self.phase, Phase::Failed(_)) && input == Input::Accept
             {
                 if self.session.as_ref().is_some_and(|s| !s.started) {
-                    self.session.as_ref().unwrap().cancel.store(true, Ordering::Relaxed);
+                    self.session
+                        .as_ref()
+                        .unwrap()
+                        .cancel
+                        .store(true, Ordering::Relaxed);
                     self.session = None;
                     self.launch_rx = None;
                     self.refresh_paused.store(false, Ordering::Relaxed);
@@ -671,7 +699,7 @@ impl Launcher {
             .as_ref()
             .is_some_and(|i| i.activation_requested())
         {
-            focus::restore(window);
+            self.restore_focus(window, cx, true);
             log(
                 &self.base,
                 "session_activated",
@@ -744,7 +772,7 @@ impl Launcher {
         if !self.foreground_checked && self.start.elapsed() > Duration::from_millis(500) {
             self.foreground_checked = true;
             if self.launch_rx.is_none() {
-                focus::restore(window);
+                self.restore_focus(window, cx, false);
             }
             log(
                 &self.base,
@@ -869,11 +897,29 @@ impl Launcher {
         let mut finished = false;
         {
             let events: Vec<_> = self.launch_rx.iter().flat_map(|rx| rx.try_iter()).collect();
+            let terminal = events.iter().any(|event| {
+                matches!(
+                    event,
+                    launch::LaunchEvent::Ended | launch::LaunchEvent::Failed(_)
+                )
+            });
             for event in events {
                 match event {
                     launch::LaunchEvent::Ready(hwnd) => {
-                        if self.session.as_ref().is_some_and(|s| s.automatic_return) {
-                            focus::handoff(window, hwnd);
+                        if !terminal
+                            && self
+                                .session
+                                .as_ref()
+                                .is_some_and(|s| s.automatic_return && !s.ended)
+                        {
+                            if !focus::handoff(window, hwnd) {
+                                log(
+                                    &self.base,
+                                    "invalid_game_window",
+                                    &hwnd.to_string(),
+                                    self.start,
+                                );
+                            }
                             log(
                                 &self.base,
                                 "focus_released",
@@ -893,7 +939,9 @@ impl Launcher {
                         );
                     }
                     launch::LaunchEvent::Started => {
-                        if let Some(session) = &mut self.session { session.started = true; }
+                        if let Some(session) = &mut self.session {
+                            session.started = true;
+                        }
                         if self.phase == Phase::Launching {
                             self.phase = Phase::Running;
                         }
@@ -924,7 +972,6 @@ impl Launcher {
                         if let Some(session) = &mut self.session {
                             session.ended = true;
                             session.requested = now;
-                            finished = !session.automatic_return;
                         }
                         log(&self.base, "game_ended", "", self.start);
                         cx.notify();
@@ -941,7 +988,11 @@ impl Launcher {
                 }
             }
         }
-        if finished {
+        if finished
+            || self.session.as_ref().is_some_and(|s| {
+                s.ended && (!s.automatic_return || s.requested.elapsed() >= Duration::from_secs(1))
+            })
+        {
             self.finish_session(window, cx);
         }
         let active = window.is_window_active();
@@ -1179,15 +1230,6 @@ impl Launcher {
 impl Render for Launcher {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.artwork.update(cx, |cache, _| cache.begin_frame());
-        // Back can arrive after Ended but before the return artwork resolves.
-        // Manual browsing must still release the completed session's launch lock.
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|s| s.ended && !s.automatic_return)
-        {
-            self.finish_session(window, cx);
-        }
         if let Some(session) = self.session.as_ref().filter(|s| s.automatic_return) {
             // Pin only these three images through gameplay. The cover is needed
             // by Details on return; video is never a readiness prerequisite.
@@ -1208,9 +1250,7 @@ impl Render for Launcher {
             // Broken/slow artwork must not trap the user on a status screen.
             let timed_out = session.requested.elapsed() >= Duration::from_secs(2);
             if ready || timed_out {
-                if session.ended {
-                    self.finish_session(window, cx);
-                } else if session.pending.is_some() && !session.frame_queued {
+                if session.pending.is_some() && !session.frame_queued && !session.ended {
                     self.session.as_mut().unwrap().frame_queued = true;
                     let generation = self.launch_generation;
                     let entity = cx.entity().downgrade();
@@ -1246,8 +1286,8 @@ impl Render for Launcher {
             self.first_render = true;
             let base = self.base.clone();
             let start = self.start;
-            window.on_next_frame(move |window, _| {
-                focus::restore(window);
+            cx.on_next_frame(window, move |this, window, cx| {
+                this.restore_focus(window, cx, false);
                 log(&base, "first_frame_callback", "", start);
             });
             log(&self.base, "first_render", "", self.start);
@@ -1406,7 +1446,7 @@ impl Render for Launcher {
                         window.toggle_fullscreen();
                         if this.launch_rx.is_none() {
                             if window.is_fullscreen() {
-                                focus::restore(window);
+                                this.restore_focus(window, cx, true);
                             } else {
                                 focus::release(window);
                             }

@@ -5,7 +5,10 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::{
     Foundation::HWND,
     System::Threading::{AttachThreadInput, GetCurrentThreadId},
-    UI::{Input::KeyboardAndMouse::SetFocus, WindowsAndMessaging::*},
+    UI::{
+        Input::KeyboardAndMouse::{SetActiveWindow, SetFocus},
+        WindowsAndMessaging::*,
+    },
 };
 
 pub(crate) fn hwnd(window: &Window) -> Option<HWND> {
@@ -35,22 +38,31 @@ pub fn permit_game_activation() {
         let _ = AllowSetForegroundWindow(ASFW_ANY);
     }
 }
+pub fn cover(window: &Window) {
+    if let Some(h) = hwnd(window) {
+        unsafe {
+            let _ = SetWindowPos(
+                h,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
 /// Remove the already-presented cover only when the game's window is stable.
-/// Do not move an unrelated foreground app out of the user's way.
-pub fn handoff(window: &Window, game: u64) {
+/// Automatic console sessions deliberately activate the game.
+pub fn handoff(window: &Window, game: u64) -> bool {
     let target = HWND(game as usize as *mut _);
     unsafe {
         let foreground = GetForegroundWindow();
-        let mut game_pid = 0;
-        let mut foreground_pid = 0;
-        GetWindowThreadProcessId(target, Some(&mut game_pid));
-        GetWindowThreadProcessId(foreground, Some(&mut foreground_pid));
-        let activate = IsWindow(Some(target)).as_bool()
-            && (may_restore(window) || (game_pid != 0 && game_pid == foreground_pid));
         // NOTOPMOST inserts the launcher at the top of the ordinary band. Do
         // this first, then put the game above it even if it already has focus.
         release(window);
-        if activate {
+        if IsWindow(Some(target)).as_bool() {
             let other = GetWindowThreadProcessId(foreground, None);
             let this = GetCurrentThreadId();
             let attached =
@@ -68,25 +80,10 @@ pub fn handoff(window: &Window, game: u64) {
             if attached {
                 let _ = AttachThreadInput(this, other, false);
             }
+            return true;
         }
     }
-}
-/// Never reclaim focus over an unrelated application after a game exits.
-/// A normal game exit exposes our retained window, or briefly the shell.
-pub fn may_restore(window: &Window) -> bool {
-    unsafe {
-        let foreground = GetForegroundWindow();
-        let mut class = [0u16; 128];
-        let len = GetClassNameW(foreground, &mut class);
-        return_restore_policy(
-            hwnd(window) == Some(foreground),
-            foreground.0.is_null(),
-            &String::from_utf16_lossy(&class[..len.max(0) as usize]),
-        )
-    }
-}
-fn return_restore_policy(ours: bool, no_window: bool, class: &str) -> bool {
-    ours || no_window || matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd")
+    false
 }
 /// Sample action keys on focus regain. Held keys must go neutral before input.
 pub fn action_keys_down() -> bool {
@@ -97,8 +94,10 @@ pub fn action_keys_down() -> bool {
     .iter()
     .any(|key| unsafe { GetAsyncKeyState(*key) < 0 })
 }
-pub fn restore(window: &mut Window) {
-    if let Some(h) = hwnd(window) {
+/// Run outside GPUI entity/window updates: restoring can synchronously draw.
+pub fn restore(handle: usize) {
+    let h = HWND(handle as *mut _);
+    if unsafe { IsWindow(Some(h)).as_bool() } {
         unsafe {
             if IsIconic(h).as_bool() {
                 let _ = ShowWindow(h, SW_RESTORE);
@@ -110,25 +109,26 @@ pub fn restore(window: &mut Window) {
                 other != 0 && other != this && AttachThreadInput(this, other, true).as_bool();
             let _ = SetWindowPos(
                 h,
-                Some(if window.is_fullscreen() {
-                    HWND_TOPMOST
-                } else {
-                    HWND_TOP
-                }),
+                Some(HWND_NOTOPMOST),
                 0,
                 0,
                 0,
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
             );
-            let _ = SetForegroundWindow(h);
+            if !SetForegroundWindow(h).as_bool() {
+                for band in [HWND_TOPMOST, HWND_NOTOPMOST] {
+                    let _ = SetWindowPos(h, Some(band), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                }
+                let _ = BringWindowToTop(h);
+            }
+            let _ = SetActiveWindow(h);
             let _ = SetFocus(Some(h));
             if attached {
                 let _ = AttachThreadInput(this, other, false);
             }
         }
     }
-    window.activate_window();
 }
 pub fn state(window: &Window) -> String {
     hwnd(window)
@@ -140,17 +140,4 @@ pub fn state(window: &Window) -> String {
             )
         })
         .unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn game_exit_restores_exposed_launcher_but_not_over_other_work() {
-        assert!(return_restore_policy(true, false, "GPUI"));
-        assert!(return_restore_policy(false, true, ""));
-        assert!(return_restore_policy(false, false, "WorkerW"));
-        assert!(!return_restore_policy(false, false, "Chrome_WidgetWin_1"));
-        assert!(!return_restore_policy(false, false, "SDL_app"));
-    }
 }
