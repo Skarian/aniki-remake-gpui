@@ -3,7 +3,8 @@
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::{
-    Foundation::HWND,
+    Foundation::{HWND, POINT},
+    Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint},
     System::Threading::{AttachThreadInput, GetCurrentThreadId},
     UI::{
         Input::KeyboardAndMouse::{SetActiveWindow, SetFocus},
@@ -17,7 +18,7 @@ pub(crate) fn hwnd(window: &Window) -> Option<HWND> {
         _ => None,
     }
 }
-// Focus operations change stacking/visibility only, never geometry.
+// Ordinary focus operations leave geometry unchanged.
 fn position(h: HWND, band: HWND, flags: SET_WINDOW_POS_FLAGS) {
     unsafe {
         let _ = SetWindowPos(h, Some(band), 0, 0, 0, 0, flags | SWP_NOMOVE | SWP_NOSIZE);
@@ -74,6 +75,33 @@ pub fn action_keys_down() -> bool {
     .iter()
     .any(|key| unsafe { GetAsyncKeyState(*key) < 0 })
 }
+/// Reuse startup's display policy on an explicit fullscreen reactivation.
+/// Query Win32 now: Apollo may have added a new primary since GPUI started.
+/// Run outside GPUI borrows, since moving/resizing invokes synchronous callbacks.
+pub fn follow_primary(handle: usize) -> windows::core::Result<()> {
+    let h = HWND(handle as *mut _);
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info).ok()?;
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
+        let rect = info.rcMonitor;
+        SetWindowPos(
+            h,
+            None,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    }
+}
 /// Run outside GPUI entity/window updates: restoring can synchronously draw.
 pub fn restore(handle: usize) {
     let h = HWND(handle as *mut _);
@@ -113,4 +141,59 @@ pub fn state(window: &Window) -> String {
             )
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::{Win32::Foundation::RECT, core::w};
+
+    #[test]
+    fn reactivation_fits_primary_without_showing_or_activating_window() {
+        unsafe {
+            // A hidden native window exercises real pixel geometry without
+            // opening the launcher, changing monitors, or taking user focus.
+            let h = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("monitor regression"),
+                WS_POPUP,
+                -10000,
+                -10000,
+                320,
+                180,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            struct Cleanup(HWND);
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = DestroyWindow(self.0);
+                    }
+                }
+            }
+            let _cleanup = Cleanup(h);
+            let foreground = GetForegroundWindow();
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            GetMonitorInfoW(monitor, &mut info).ok().unwrap();
+            // Repeating the activation must keep the same exact monitor bounds.
+            for _ in 0..2 {
+                follow_primary(h.0 as usize).unwrap();
+                let mut actual = RECT::default();
+                GetWindowRect(h, &mut actual).unwrap();
+                assert_eq!(actual, info.rcMonitor);
+                assert!(!IsWindowVisible(h).as_bool());
+                assert_eq!(GetForegroundWindow(), foreground);
+                assert_eq!(GetWindowLongW(h, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0, 0);
+            }
+        }
+    }
 }

@@ -40,6 +40,8 @@ Optionally run `importer/install-live-export.ps1 -PlayniteRoot 'D:\Playnite'`, t
 
 Set Apollo's command to the full path of `aniki-remake-gpui.exe` and its working directory to the containing folder. The cover is [assets/apollo/aniki-remake-gpui-cover.png](assets/apollo/aniki-remake-gpui-cover.png). Apollo is optional; the same executable works standalone.
 
+Fullscreen startup and explicit reactivation use the current Windows primary display. If Apollo creates a new primary virtual display while the launcher is already open, launching it again moves and resizes that same window to the new display. Windowed reactivation and automatic game return keep their existing placement. Configure Apollo's streaming display as primary when using multiple displays.
+
 ## Game lifecycle
 
 The launcher keeps one fullscreen GPUI window visible. It presents the game's still background, logo, and orbit animation before dispatching launch. It holds that cover until a visible, responsive game window has remained stable for 1.5 seconds, then releases topmost status and hands over focus. That status screen remains underneath throughout gameplay. Music and video stop; only the game's background, logo, and Details cover remain cached. The animation pauses while the launcher is inactive. Back cancels an attempt before Started is observed, or dismisses the cover and disables automatic return after Started. Cancellation never kills a game; a late-starting game can run untracked. The 90-second readiness limit uncovers the desktop without abandoning process tracking; a late ready window can still receive focus.

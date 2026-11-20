@@ -429,6 +429,7 @@ impl Launcher {
             return;
         };
         let generation = self.launch_generation;
+        let follow_primary = explicit && window.is_fullscreen();
         window.focus(&self.focus);
         cx.spawn(async move |this, cx| {
             let eligible = this
@@ -438,6 +439,18 @@ impl Launcher {
                 .unwrap_or(false);
             if eligible {
                 // No entity or Window borrow is held during synchronous Win32 callbacks.
+                if follow_primary {
+                    if let Err(error) = focus::follow_primary(hwnd) {
+                        let _ = this.read_with(cx, |this, _| {
+                            log(
+                                &this.base,
+                                "monitor_restore_failed",
+                                &error.to_string(),
+                                this.start,
+                            )
+                        });
+                    }
+                }
                 focus::restore(hwnd);
                 let _ = this.read_with(cx, |this, _| {
                     log(&this.base, "native_restored", "", this.start)
