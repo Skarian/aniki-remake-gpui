@@ -659,8 +659,8 @@ impl Launcher {
         self.video = media::Video::watch(
             &self.config.ffmpeg,
             &game.video,
-            width as u32,
-            height as u32,
+            (width * window.scale_factor()) as u32,
+            (height * window.scale_factor()) as u32,
             self.config.video_threads,
         );
         if self.video.is_some() {
@@ -1107,8 +1107,8 @@ impl Launcher {
                         self.video = media::Video::start(
                             &self.config.ffmpeg,
                             &game.video,
-                            width as u32,
-                            height as u32,
+                            (width * window.scale_factor()) as u32,
+                            (height * window.scale_factor()) as u32,
                             self.config.video_threads,
                         );
                     }

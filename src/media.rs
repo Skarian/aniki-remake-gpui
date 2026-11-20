@@ -1,4 +1,5 @@
 use gpui::RenderImage;
+use std::os::windows::io::FromRawHandle;
 use std::os::windows::process::CommandExt;
 use std::{
     io::Read,
@@ -11,7 +12,8 @@ use std::{
     thread,
 };
 pub struct Video {
-    child: Child,
+    child: Arc<Mutex<Option<Child>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
     pub frame: Arc<Mutex<Option<Arc<RenderImage>>>>,
     reader: Option<thread::JoinHandle<()>>,
 }
@@ -39,57 +41,80 @@ impl Video {
         if ffmpeg.is_empty() || !Path::new(path).is_file() {
             return None;
         }
-        // Preserve 1080p trailer detail; cap decode/upload work on larger displays.
-        let scale = (viewport_width as f32 / 1920.)
-            .min(viewport_height as f32 / 1080.)
-            .clamp(0.5, 1.);
-        let width = ((1920. * scale) as u32 / 2) * 2;
-        let height = ((1080. * scale) as u32 / 2) * 2;
-        let filter = if looping {
-            format!(
-                "scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,crop={width}:{height},fps=30"
-            )
-        } else {
-            format!(
-                "scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps=30"
-            )
-        };
-        let threads = threads.min(32).to_string();
-        let mut child = Command::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-re",
-                "-stream_loop",
-                if looping { "-1" } else { "0" },
-                "-threads",
-                &threads,
-                "-i",
-                path,
-                "-filter_threads",
-                &threads,
-                "-threads",
-                &threads,
-                "-an",
-                "-vf",
-                &filter,
-                "-pix_fmt",
-                "bgra",
-                "-f",
-                "rawvideo",
-                "pipe:1",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .creation_flags(0x08000000)
-            .spawn()
-            .ok()?;
-        let mut stream = child.stdout.take()?;
+        let ffmpeg = ffmpeg.to_owned();
+        let path = path.to_owned();
+        let child = Arc::new(Mutex::new(None));
+        let worker_child = child.clone();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_stop = stop.clone();
         let frame = Arc::new(Mutex::new(None));
         let target = frame.clone();
+        let threads = threads.min(32).to_string();
         let reader = thread::spawn(move || {
+            // Probe and decode off the UI thread. Both processes remain cancellable.
+            let probe = Path::new(&ffmpeg).with_file_name("ffprobe.exe");
+            let mut metadata = String::new();
+            if let Some(mut pipe) = video_pipe(
+                Command::new(probe).args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "csv=p=0:s=x",
+                    &path,
+                ]),
+                &worker_child,
+                &worker_stop,
+            ) {
+                let _ = pipe.read_to_string(&mut metadata);
+            }
+            let source = metadata
+                .trim()
+                .split_once('x')
+                .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+                .unwrap_or((1920, 1080));
+            let (width, height) = video_size(viewport_width, viewport_height, source.0, source.1);
+            let sizing = if looping {
+                format!("increase:flags=lanczos,crop={width}:{height}")
+            } else {
+                format!("decrease:flags=lanczos,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2")
+            };
+            let filter = format!(
+                "scale={width}:{height}:force_original_aspect_ratio={sizing},fps='min(source_fps,60)'"
+            );
+            let Some(mut stream) = video_pipe(
+                Command::new(&ffmpeg).args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-re",
+                    "-stream_loop",
+                    if looping { "-1" } else { "0" },
+                    "-threads",
+                    &threads,
+                    "-i",
+                    &path,
+                    "-filter_threads",
+                    &threads,
+                    "-threads",
+                    &threads,
+                    "-an",
+                    "-vf",
+                    &filter,
+                    "-pix_fmt",
+                    "bgra",
+                    "-f",
+                    "rawvideo",
+                    "pipe:1",
+                ]),
+                &worker_child,
+                &worker_stop,
+            ) else {
+                return;
+            };
             loop {
                 let mut bytes = vec![0u8; (width * height * 4) as usize];
                 if stream.read_exact(&mut bytes).is_err() {
@@ -106,12 +131,15 @@ impl Video {
         });
         Some(Self {
             child,
+            stop,
             frame,
             reader: Some(reader),
         })
     }
     pub fn finished(&mut self) -> bool {
-        self.child.try_wait().ok().flatten().is_some()
+        self.reader
+            .as_ref()
+            .is_none_or(|reader| reader.is_finished())
     }
     pub fn take_frame(&self) -> Option<Arc<RenderImage>> {
         self.frame.lock().ok()?.take()
@@ -119,11 +147,157 @@ impl Video {
 }
 impl Drop for Video {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mut child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
+    }
+}
+
+fn video_pipe(
+    command: &mut Command,
+    slot: &Mutex<Option<Child>>,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Option<std::fs::File> {
+    let mut slot = slot.lock().unwrap();
+    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    if let Some(mut previous) = slot.take() {
+        let _ = previous.wait();
+    }
+    // Windows' small default anonymous pipe throttles 4K BGRA transfers.
+    // A bounded 1 MiB pipe avoids thousands of tiny producer/consumer wakeups.
+    let (read, write) = unsafe {
+        use windows::Win32::{Foundation::HANDLE, System::Pipes::CreatePipe};
+        let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
+        CreatePipe(&mut read, &mut write, None, 1024 * 1024).ok()?;
+        (
+            std::fs::File::from_raw_handle(read.0),
+            std::fs::File::from_raw_handle(write.0),
+        )
+    };
+    let spawned = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(write))
+        .stderr(Stdio::null())
+        .creation_flags(0x08000000)
+        .spawn();
+    // Command retains supplied handles after spawn; release the parent's writer
+    // so the reader sees EOF when the child exits (including cancellation).
+    command.stdout(Stdio::null());
+    let child = spawned.ok()?;
+    *slot = Some(child);
+    Some(read)
+}
+
+// Bound uploads by the actual display, source detail and 4K. GPU scaling handles
+// any remaining enlargement, rather than upscaling a 1080p file in the decoder.
+fn video_size(
+    view_width: u32,
+    view_height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> (u32, u32) {
+    let scale = (view_width as f32 / 3840.)
+        .min(view_height as f32 / 2160.)
+        .min(source_width as f32 / 3840.)
+        .min(source_height as f32 / 2160.)
+        .min(1.);
+    (
+        ((3840. * scale) as u32 / 2 * 2).max(2),
+        ((2160. * scale) as u32 / 2 * 2).max(2),
+    )
+}
+
+#[cfg(test)]
+mod video_tests {
+    use super::*;
+
+    #[test]
+    fn video_resolution_preserves_source_detail_with_bounded_uploads() {
+        assert_eq!(video_size(3840, 2160, 3840, 2160), (3840, 2160));
+        assert_eq!(video_size(3840, 2160, 1920, 1080), (1920, 1080));
+        assert_eq!(video_size(2560, 1440, 3840, 2160), (2560, 1440));
+        assert_eq!(video_size(7680, 4320, 7680, 4320), (3840, 2160));
+        assert_eq!(video_size(3440, 1440, 3840, 2160), (2560, 1440));
+        assert_eq!(video_size(0, 0, 0, 0), (2, 2));
+    }
+
+    #[test]
+    fn cancelled_video_worker_cannot_spawn_another_decoder() {
+        let slot = Mutex::new(None);
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        assert!(video_pipe(&mut Command::new("must-not-be-started.exe"), &slot, &stop).is_none());
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires ANIKI_TEST_VIDEO and ANIKI_TEST_FFMPEG; real decoder, no UI"]
+    fn real_video_preserves_resolution_pacing_and_stops() {
+        use std::time::{Duration, Instant};
+        let path = std::env::var("ANIKI_TEST_VIDEO").unwrap();
+        let ffmpeg = std::env::var("ANIKI_TEST_FFMPEG").unwrap();
+        let width = std::env::var("ANIKI_TEST_WIDTH")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        let height = std::env::var("ANIKI_TEST_HEIGHT")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        let fps = std::env::var("ANIKI_TEST_FPS")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        let mut video = Video::start(&ffmpeg, &path, width, height, 2).unwrap();
+        let started = Instant::now();
+        let mut measured = None;
+        let mut frames = 0;
+        loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "decoder stalled"
+            );
+            assert!(!video.finished(), "decoder exited early");
+            if let Some(frame) = video.take_frame() {
+                let size = frame.size(0);
+                assert_eq!((size.width.0 as u32, size.height.0 as u32), (width, height));
+                // Exclude FFmpeg's initial real-time catch-up burst.
+                if started.elapsed() < Duration::from_secs(2) {
+                    continue;
+                }
+                if let Some(since) = measured {
+                    frames += 1;
+                    let elapsed: Duration = Instant::now() - since;
+                    if elapsed >= Duration::from_secs(5) {
+                        let rate = frames as f64 / elapsed.as_secs_f64();
+                        println!(
+                            "{width}x{height}: {rate:.1} frames/s (source {fps}); measurement began {:?}",
+                            since - started
+                        );
+                        assert!(
+                            rate >= fps * 0.9 && rate <= fps * 1.15,
+                            "decoder pacing: {rate}"
+                        );
+                        break;
+                    }
+                } else {
+                    measured = Some(Instant::now());
+                }
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        let ended = Instant::now();
+        drop(video);
+        assert!(
+            ended.elapsed() < Duration::from_secs(2),
+            "decoder shutdown stalled"
+        );
     }
 }
 pub struct Music {
