@@ -1254,7 +1254,21 @@ impl Launcher {
                 .relative()
                 .overflow_hidden()
                 .bg(rgb(0x080d14))
-                .child(scene.opacity(progress)),
+                .child(scene.opacity(progress))
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        |_, _, window, _| {
+                            if window.is_fullscreen() {
+                                // Override child button cursors on every page.
+                                // GPUI applies this only while our window is hovered.
+                                window.set_window_cursor_style(CursorStyle::None);
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                ),
         )
     }
 }
