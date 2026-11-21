@@ -328,6 +328,15 @@ fn run(original: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> 
                             "",
                         );
                     }
+                    if !plan.url
+                        && Path::new(&plan.executable).is_relative()
+                        && !plan.working_dir.is_empty()
+                    {
+                        plan.executable = Path::new(&plan.working_dir)
+                            .join(&plan.executable)
+                            .to_string_lossy()
+                            .into_owned();
+                    }
                     resolved = plan;
                     worker = None;
                     break;
@@ -363,16 +372,28 @@ fn run(original: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> 
     let steam = plan.kind == "steam";
     let directory = steam || plan.kind == "directory" || worker.is_some();
     let install = if directory && !plan.install_dir.is_empty() {
-        let path = std::fs::canonicalize(&plan.install_dir)
-            .map_err(|error| format!("Game installation directory is unavailable: {error}"))?;
-        if !path.is_dir() {
-            return Err("Game installation path is not a directory.".into());
-        }
-        path.to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .trim_end_matches(['\\', '/'])
-            .to_lowercase()
-            + "\\"
+        // A custom controller already owns lifetime. Its cached directory is
+        // only a window-discovery hint, and must not invalidate its Started event.
+        (|| -> Result<String, String> {
+            let path = std::fs::canonicalize(&plan.install_dir)
+                .map_err(|error| format!("Game installation directory is unavailable: {error}"))?;
+            if !path.is_dir() {
+                return Err("Game installation path is not a directory.".into());
+            }
+            Ok(path
+                .to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .trim_end_matches(['\\', '/'])
+                .to_lowercase()
+                + "\\")
+        })()
+        .or_else(|error| {
+            if worker.is_some() {
+                Ok(String::new())
+            } else {
+                Err(error)
+            }
+        })?
     } else {
         String::new()
     };

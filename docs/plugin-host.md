@@ -21,10 +21,12 @@ not started.
   data, account authentication, import and metadata services are not hosted.
 - Automatic File/URL actions become native launch plans. Process-tree and
   directory tracking reuse the Rust loop; other tracking modes are rejected.
+  Relative File paths resolve against the action's working directory.
   The worker exits before the automatic action is dispatched.
 - Custom controllers execute their actual `Play` method. Their callbacks are the
   sole source of lifetime events. Rust uses the reported PID and installation
   directory only to find a ready window; it does not independently end the session.
+  A stale cached directory does not cancel a custom controller's tracking.
 - Back before Started cancels the worker, never the game or store client. A launch
   already sent to a client can still start later, untracked. A worker crash reports
   lost tracking and releases the cover without claiming the game exited. The UI's
@@ -50,6 +52,7 @@ product exe, with a managed adapter DLL, rather than a second helper executable.
 .\build.ps1 -Test
 cargo build --example launch_probe --locked
 python tests/plugin_worker.py --exe <packaged-exe> --probe target/debug/examples/launch_probe.exe
+python tests/storefront_actions.py --exe <packaged-exe> --plugins <downloaded-plugin-folders> --probe target/debug/examples/launch_probe.exe
 ```
 
 The probe compiles the production launch, plugin and library modules. The fixture
@@ -74,8 +77,8 @@ desktop free while running them. All fixture data stays under `artifacts`.
 - The official GOG 2.25 DLL resolved a synthetic installed-game manifest into an
   automatic File/Process plan using the production managed adapter. This is not
   a real GOG purchase/account/gameplay test.
-- Epic, Xbox, Ubisoft and Battle.net remain experimental. Earlier constructor
-  probes informed the adapter; they do not certify real-game launches.
+- Xbox, Ubisoft and Battle.net have no real-game launch evidence on this PC.
+  Source and downloaded-DLL checks do not certify those launches.
 
 The first directory fixture placed the probe executable beneath the fake install
 directory. The tracker correctly kept that directory active. Moving the runner
@@ -93,10 +96,51 @@ do not establish every storefront's behavior, physical controller compatibility,
 or frame-by-frame absence of desktop exposure. The candidate is ready for normal
 user testing; these are representative checks, not an all-games certification.
 
+## Follow-up fixes and checks, 2026-11-21
+
+Three repairs follow the plugin source audit:
+
+- Supply the SDK's JSON string, file and stream Try methods, including out values
+  and errors. These methods follow Playnite's success, failure and stream ownership
+  rules. Epic uses all three forms across its manifest formats.
+- Resolve an automatic File action's relative executable against its working
+  directory. GOG emits this form for nested game directories.
+- Treat an unavailable custom-controller install directory as a missing window
+  hint. Keep its Started/Stopped callbacks authoritative. Automatic Directory
+  actions still reject unavailable directories because they need them for tracking.
+
+Validation on the revised candidate:
+
+- 39 Rust tests passed, with one existing optional video test ignored.
+- 20 worker and launch-loop cases passed. These include the serializer contracts,
+  missing/file-valued custom directories, strict automatic directory validation,
+  pending cancellation, parent disconnect and worker crashes.
+- 10 actual-DLL cases passed with Epic 2.35 and GOG 2.25. Synthetic data covered
+  Epic legacy, v4 and v2 manifests and malformed data. GOG covered absolute and
+  relative paths, Galaxy settings and explicit errors for multiple/URL-process
+  actions. The GOG relative action launched a short-lived fixture through Rust.
+  No Epic/GOG store client or purchased game was launched.
+- DAVE THE DIVER reached its menu through installed Steam 2.44 with Playnite closed.
+  Closing the game returned to Details in the same launcher. The log recorded
+  `foreground=true;topmost=false`, and the worker exited. Steam settings retained
+  the hash recorded above. No UI, focus or emulator-control code changed.
+
+Local machine results are in `artifacts/plugin-worker-tests/results.json`,
+`artifacts/storefront-action-tests/results.json` and
+`artifacts/plugin-host-fixes/steam-session.json`. DLL and executable hashes are
+included in the test reports. The package source list remains in the root
+checkout's `artifacts/plugin-host-research/packages.json`.
+
+Known limits remain explicit: GOG multi-action selection and URL actions with
+process tracking are unsupported. The audited Battle.net classic-controller
+null-event bug belongs to the upstream plugin and is not patched by this host.
+These tests do not establish all-storefront gameplay support.
+
 ## Size
 
-Runtime source is 5686 physical lines across `src/*.rs` and
-`importer/*.cs`, versus 5250 at the checkpoint: net +436. This excludes
+Runtime source is 5722 physical lines across `src/*.rs` and
+`importer/*.cs`, versus 5250 at the checkpoint: net +472. The three follow-up
+repairs add 36 lines over the first plugin-host build. This excludes
 Rust test blocks and the test-only probe/fixture files; it includes comments and
 blank lines. The production executable is about 14.8 MiB and the adapter DLL
-about 20 KiB. Existing media, SDK and plugin files are not bundled again.
+21 KiB. Existing media, SDK and plugin files are not bundled again.

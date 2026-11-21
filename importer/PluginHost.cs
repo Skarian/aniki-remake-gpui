@@ -120,6 +120,13 @@ class SdkResolver:DefaultContractResolver {
 class ApiProxy:RealProxy {
     readonly Type type;
     internal ApiProxy(Type type):base(type) {this.type=type;}
+    static object ReadJson(string method,object input,Type result) {
+        if(method=="FromJson") return JsonConvert.DeserializeObject((string)input,result,AnikiPluginHost.Json);
+        var stream=method=="FromJsonFile"?File.OpenRead((string)input):(Stream)input;
+        using(var reader=new StreamReader(stream))
+        using(var json=new JsonTextReader(reader))
+            return JsonSerializer.Create(AnikiPluginHost.Json).Deserialize(json,result);
+    }
     public override IMessage Invoke(IMessage raw) {
         var call=(IMethodCallMessage)raw;
         var method=(MethodInfo)call.MethodBase;
@@ -128,8 +135,16 @@ class ApiProxy:RealProxy {
             object value;
             if(method.Name=="GetType") value=type;
             else if(type==typeof(IDataSerializer)) {
-                if(method.Name=="FromJsonFile") value=JsonConvert.DeserializeObject(File.ReadAllText((string)call.Args[0]),method.GetGenericArguments()[0],AnikiPluginHost.Json);
-                else if(method.Name=="FromJson") value=JsonConvert.DeserializeObject((string)call.Args[0],method.GetGenericArguments()[0],AnikiPluginHost.Json);
+                if(method.Name=="TryFromJson" || method.Name=="TryFromJsonFile" || method.Name=="TryFromJsonStream") {
+                    var args=(object[])call.Args.Clone();
+                    Exception error=null;
+                    try { args[1]=ReadJson(method.Name.Substring(3),args[0],method.GetGenericArguments()[0]); }
+                    catch(Exception e) { args[1]=null; error=e; }
+                    if(args.Length==3) args[2]=error;
+                    return new ReturnMessage(error==null,args,args.Length,call.LogicalCallContext,call);
+                }
+                if(method.Name=="FromJsonFile" || method.Name=="FromJson" || method.Name=="FromJsonStream")
+                    value=ReadJson(method.Name,call.Args[0],method.GetGenericArguments()[0]);
                 else if(method.Name=="ToJson") value=JsonConvert.SerializeObject(call.Args[0],AnikiPluginHost.Json);
                 else if(method.Name=="GetClone") value=JsonConvert.DeserializeObject(JsonConvert.SerializeObject(call.Args[0],AnikiPluginHost.Json),method.GetGenericArguments().Last(),AnikiPluginHost.Json);
                 else throw new NotSupportedException("Unimplemented serializer: "+method.Name);

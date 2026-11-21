@@ -25,7 +25,7 @@ def spawn(mode,module=dll):
     child.stdin.write(json.dumps(request(mode,module))+'\n');child.stdin.flush()
     return child
 results=[]
-for mode,expected in [('normal',['started','stopped']),('early-stop',['stopped']),
+for mode,expected in [('normal',['started','stopped']),('serialization',['started','stopped']),('early-stop',['stopped']),
     ('automatic',['automatic']),('automatic-directory',['automatic']),('throw',['error']),('unsupported',['error']),('multiple',['error']),('crash',[])]:
     child=spawn(mode)
     try:
@@ -51,18 +51,26 @@ if a.probe:
     subprocess.run([str(framework/'csc.exe'),'/nologo','/target:winexe',
         '/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll',
         '/out:'+str(game_dir/'WindowFixture.exe'),str(root/'tests/WindowFixture.cs')],check=True)
-    for mode in ('normal','early-stop','throw','crash','pending','automatic','automatic-directory'):
-        plan=out/(mode+'.json');plan.write_text(json.dumps(dict(kind='plugin',install_dir=str(game_dir),plugin=request(mode))))
+    for mode in ('normal','early-stop','throw','crash','pending','automatic','automatic-directory',
+                 'custom-missing-directory','custom-file-directory','automatic-missing-directory'):
+        payload=request('normal' if mode.startswith('custom-') else 'automatic-directory' if mode=='automatic-missing-directory' else mode)
+        install=game_dir
+        if mode.endswith('missing-directory'): install=out/'missing-game'
+        if mode=='custom-file-directory': install=dll
+        if mode=='automatic-missing-directory': payload['game']['InstallDirectory']=str(install)
+        plan=out/(mode+'.json');plan.write_text(json.dumps(dict(kind='plugin',install_dir=str(install),plugin=payload)))
         command=[str(runner/'launch_probe.exe'),str(plan)]
         if mode=='pending': command.append('500')
         run=subprocess.run(command,capture_output=True,text=True,timeout=20)
         assert run.returncode==0,(mode,run.stdout,run.stderr)
         events=[json.loads(line) for line in run.stdout.splitlines()]
         if mode=='pending': assert events==[],events
-        elif mode in ('throw','crash'): assert len(events)==1 and 'Failed' in events[0],events
+        elif mode in ('throw','crash','automatic-missing-directory'): assert len(events)==1 and 'Failed' in events[0],events
         elif mode=='early-stop': assert events==['Ended'],events
         else: assert events[0]=='Started' and events[-1]=='Ended',events
         results.append(dict(case='rust-'+mode,passed=True,events=events))
-report=dict(sha256=hashlib.sha256(a.exe.read_bytes()).hexdigest(),cases=results)
+report=dict(sha256=hashlib.sha256(a.exe.read_bytes()).hexdigest(),
+    adapter_sha256=hashlib.sha256((a.exe.parent/'importer/Aniki.PluginHost.dll').read_bytes()).hexdigest(),
+    probe_sha256=hashlib.sha256(a.probe.read_bytes()).hexdigest() if a.probe else None,cases=results)
 (out/'results.json').write_text(json.dumps(report,indent=2))
 print(json.dumps(report,indent=2))

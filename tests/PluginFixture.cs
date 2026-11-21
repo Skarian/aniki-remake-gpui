@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.Text;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Playnite.SDK;
@@ -12,6 +14,7 @@ public class FixtureLibrary:LibraryPlugin {
         if(System.Windows.Application.Current!=null) throw new Exception("Unexpected WPF application");
     }
     public override IEnumerable<PlayController> GetPlayActions(GetPlayActionsArgs args) {
+        if(args.Game.GameId=="serialization") CheckSerialization(args.Game.InstallDirectory);
         if(args.Game.GameId=="unsupported") { var ignored=PlayniteApi.Database.Games; }
         if(args.Game.GameId.StartsWith("automatic")) {
             yield return new AutomaticPlayController(args.Game) {
@@ -23,6 +26,31 @@ public class FixtureLibrary:LibraryPlugin {
             yield return new FixtureController(args.Game);
             if(args.Game.GameId=="multiple") yield return new FixtureController(args.Game);
         }
+    }
+    public class JsonValue { public int Value; }
+    static void Require(bool condition,string message) { if(!condition) throw new Exception(message); }
+    static MemoryStream JsonStream(string text) { return new MemoryStream(Encoding.UTF8.GetBytes(text)); }
+    static void CheckSerialization(string directory) {
+        const string json="{\"Value\":42}";
+        JsonValue value; Exception error;
+        var file=Path.Combine(directory,"serializer.json");
+        File.WriteAllText(file,json);
+        Require(Playnite.SDK.Data.Serialization.TryFromJson(json,out value) && value.Value==42,"JSON out value");
+        Require(Playnite.SDK.Data.Serialization.TryFromJson(json,out value,out error) && value.Value==42 && error==null,"JSON success error");
+        Require(!Playnite.SDK.Data.Serialization.TryFromJson("{",out value,out error) && value==null && error!=null,"JSON error out value");
+        Require(!Playnite.SDK.Data.Serialization.TryFromJson("{",out value) && value==null,"JSON two-argument failure");
+        Require(Playnite.SDK.Data.Serialization.TryFromJson("null",out value) && value==null,"JSON null is valid");
+        Require(Playnite.SDK.Data.Serialization.TryFromJsonFile(file,out value) && value.Value==42,"File out value");
+        Require(Playnite.SDK.Data.Serialization.TryFromJsonFile(file,out value,out error) && value.Value==42 && error==null,"File success error");
+        Require(!Playnite.SDK.Data.Serialization.TryFromJsonFile(file+".missing",out value,out error) && value==null && error is FileNotFoundException,"Missing file");
+        File.WriteAllText(file,"{");
+        Require(!Playnite.SDK.Data.Serialization.TryFromJsonFile(file,out value) && value==null,"Malformed file");
+        var stream=JsonStream(json);
+        Require(Playnite.SDK.Data.Serialization.TryFromJsonStream(stream,out value) && value.Value==42 && !stream.CanRead,"Stream out value and ownership");
+        Require(Playnite.SDK.Data.Serialization.TryFromJsonStream(JsonStream(json),out value,out error) && value.Value==42 && error==null,"Stream success error");
+        Require(!Playnite.SDK.Data.Serialization.TryFromJsonStream(JsonStream("{"),out value,out error) && value==null && error!=null,"Stream error");
+        Require(!Playnite.SDK.Data.Serialization.TryFromJsonStream(JsonStream("{"),out value) && value==null,"Stream two-argument failure");
+        Require(Playnite.SDK.Data.Serialization.FromJsonStream<JsonValue>(JsonStream(json)).Value==42,"Direct stream read");
     }
 }
 class FixtureController:PlayController {
