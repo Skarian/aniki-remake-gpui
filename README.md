@@ -22,7 +22,7 @@ Requires Windows x64, Rust with the MSVC toolchain, Visual Studio C++ Build Tool
 
 1. Copy `aniki-remake-gpui.example.json` to `aniki-remake-gpui.json`. Set `playnite_root` to your Playnite installation/data directory and `ffmpeg` to your FFmpeg executable if you want trailers.
 2. Place the **x64 SDL2.dll** runtime beside the executable. The tested version is SDL 2.30.5. Playnite may ship a 32-bit DLL, which cannot be used here. See [SDL releases](https://github.com/libsdl-org/SDL/releases) and the bundled third-party notices.
-3. Build the read-only importer and launcher:
+3. Build the read-only importer, managed plugin adapter and launcher:
 
 ```powershell
 .\importer\build.ps1 -PlayniteRoot 'D:\Playnite'
@@ -54,9 +54,11 @@ See [Playnite alignment](docs/playnite-alignment.md) for the source comparison a
 
 ## Compatibility and limits
 
-Steam launches invoke the installed Steam client with `-silent "steam://rungameid/<id>"`, matching Playnite's Steam plugin without relying on Windows URL associations. Direct executable and emulator launches resolve Playnite profiles and Windows arguments. Direct launches use Windows shell execution and track the launched process tree. Steam follows Playnite?s directory tracker: the first matching process starts the session; the first later empty observation ends it. It scans immediately, then makes lifetime decisions every two seconds. A pre-existing matching process counts, and a lingering one keeps the session open. A never-started attempt remains cancellable; there is no startup deadline. Windows launch errors include their underlying error details.
+Steam now uses the actual installed Playnite Steam library DLL. An on-demand worker runs inside a second instance of this executable, hosts .NET Framework, and loads one library plugin. Playnite itself stays closed. The worker exits after an automatic action is resolved, or remains until a custom controller reports Stopped. No CLR or plugin is loaded into the GPUI process. See [plugin hosting](docs/plugin-host.md) for scope and verification.
 
-This is not full Playnite compatibility. Non-Steam store integrations, launch scripts, multi-action / multi-ROM selection, advanced custom tracking, library editing, achievements, downloads, and playtime writeback are not implemented. Unsupported actions produce an error. An emulator left running after its window closes may need to finish exiting or be closed before another instance can start; the launcher does not force-kill it.
+The initial provider list is Steam, Epic, GOG, Xbox, Ubisoft and Battle.net. Install their integrations through Playnite first. Steam has a real-game launch/return check; GOG has an actual-DLL automatic-action check. The other providers are experimental, not certified storefront compatibility. Emulator and explicit executable actions retain native process-tree tracking. Old cached Steam plans retain their native fallback until the library refreshes.
+
+The adapter supports a narrow SDK surface. Login/import dialogs, scripts, multi-action / multi-ROM selection, advanced custom tracking, library editing, achievements, downloads, and playtime writeback are not implemented. Unsupported SDK calls/actions produce an error. Plugin settings are copied for each worker and changes are discarded. An emulator left running after its window closes may need to finish exiting or be closed before another instance can start; the launcher does not force-kill it.
 
 Trailers preserve the source frame rate up to 60 fps and decode up to 4K, bounded by the source resolution and the display's physical pixel size. Keep `ffprobe.exe` beside the configured `ffmpeg.exe` for source-size detection; without it, decoding falls back to a 1080p size limit. The default is two decoder/filter/output threads; `video_threads: 0` enables FFmpeg auto sizing. Artwork uses a bounded cache, and media stops on focus loss or game launch. Exact long-duration trailer audio/video synchronization has not been measured.
 
@@ -64,7 +66,7 @@ Music and trailer audio use FFmpeg and a bounded SDL stereo queue. Music loops, 
 
 ## Verification
 
-The [2026-11-10 QA report](docs/qa-2026-11-10.md) records the tested builds, the corrected startup-focus regression, and remaining release gates. The realignment candidate is not yet deployed.
+The [2026-11-10 QA report](docs/qa-2026-11-10.md) records the tested builds, the corrected startup-focus regression, and remaining release gates. The plugin-host candidate is validated separately in [plugin hosting](docs/plugin-host.md).
 
 - `build.ps1 -Test`: Rust tests for launch resolution, process tracking, input, cache ownership, and motion.
 - `python tests/retained_lifecycle.py --exe <built-exe> --expected-sha256 <recorded-hash>`: real-window tests proving the launcher PID and HWND survive two game cycles each with Xbox and virtual DualShock 4 input; also covers lingering processes, explicit restore, duplicate invocation, missing executables, owner crashes, and normal exit. Builds its own WinForms fixture and needs no game library.

@@ -7,6 +7,7 @@ mod launch;
 mod library;
 mod media;
 mod motion;
+mod plugin;
 mod screens;
 use controller::{Controller, Input, Kind};
 use gpui::{prelude::*, *};
@@ -1903,6 +1904,9 @@ fn base_dir() -> PathBuf {
     std::env::current_dir().unwrap()
 }
 fn main() {
+    if std::env::args().any(|arg| arg == "--plugin-worker") {
+        std::process::exit(plugin::worker_main());
+    }
     // GUI-subsystem builds have no stderr console. Keep failures diagnosable.
     std::panic::set_hook(Box::new(|info| {
         let base = base_dir();

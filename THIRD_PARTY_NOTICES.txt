@@ -1,3 +1,5 @@
+Playnite SDK serialization attribute handling in importer/PluginHost.cs is adapted from Playnite (MIT), covered by the following notice. Store plugin DLLs are loaded from the user installation and are not redistributed.
+
 MIT License
 
 Copyright (c) 2020 Josef Nemec

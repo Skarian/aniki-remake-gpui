@@ -1,3 +1,5 @@
+> Plugin-host update: newly normalized storefront games now call the installed DLL itself, rather than the historical Steam Rust port described below. See [plugin-host.md](plugin-host.md). The retained-window focus/return contract is unchanged. The old Steam branch remains only for cached pre-update plans.
+
 # Playnite lifecycle alignment
 
 Reference: [JosefNemec/Playnite at e2e6efc](https://github.com/JosefNemec/Playnite/tree/e2e6efcda311fea38fcd92f61c8ca90811d97f28). Inspected the existing pinned checkout read-only; did not fetch or modify it.

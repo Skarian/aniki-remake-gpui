@@ -203,7 +203,9 @@ impl Drop for StartedProcess {
 fn start_process(plan: &LaunchPlan) -> windows::core::Result<StartedProcess> {
     let executable = wide(&plan.executable);
     let arguments = wide(&plan.arguments);
-    let directory = if plan.working_dir.is_empty() {
+    let directory = if plan.url {
+        String::new()
+    } else if plan.working_dir.is_empty() {
         Path::new(&plan.executable)
             .parent()
             .unwrap_or(Path::new("."))
@@ -286,20 +288,81 @@ pub fn start(plan: LaunchPlan, tx: Sender<LaunchEvent>, cancel: Arc<AtomicBool>)
         }
     });
 }
-fn run(plan: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> Result<(), String> {
+fn run(original: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Relaxed) {
         return Ok(());
     }
-    if !plan.error.is_empty() {
-        return Err(plan.error.clone());
+    if !original.error.is_empty() {
+        return Err(original.error.clone());
     }
+    let mut resolved = original.clone();
+    let mut worker = if let Some(request) = &original.plugin {
+        Some(crate::plugin::Worker::start(request)?)
+    } else {
+        None
+    };
+    // A custom controller owns lifetime. Rust only watches its windows.
+    let mut plugin_pid = None;
+    let pending = Instant::now();
+    let mut pending_expired = false;
+    if let Some(host) = &worker {
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            match host.events.recv_timeout(Duration::from_millis(100)) {
+                Ok(crate::plugin::Event::Automatic { mut plan }) => {
+                    let request = original.plugin.as_ref().unwrap();
+                    for field in [
+                        &mut plan.executable,
+                        &mut plan.arguments,
+                        &mut plan.working_dir,
+                        &mut plan.install_dir,
+                    ] {
+                        *field = crate::library::expand(
+                            field,
+                            &request.game,
+                            &request.root,
+                            "",
+                            None,
+                            "",
+                        );
+                    }
+                    resolved = plan;
+                    worker = None;
+                    break;
+                }
+                Ok(crate::plugin::Event::Started { pid }) => {
+                    plugin_pid = Some(pid);
+                    break;
+                }
+                Ok(crate::plugin::Event::Stopped) => {
+                    let _ = tx.send(LaunchEvent::Ended);
+                    return Ok(());
+                }
+                Ok(crate::plugin::Event::Error { message }) => return Err(message),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Plugin worker stopped; the game is now untracked.".into());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Pending plugins may be blocked by a store dialog. The UI's Back cancels.
+                    if pending.elapsed() >= Duration::from_secs(90) && !pending_expired {
+                        pending_expired = true;
+                        let _ = tx.send(LaunchEvent::ReadinessExpired);
+                    }
+                }
+            }
+        }
+    }
+    let plan = &resolved;
     // Shell handlers require an apartment on the dispatching worker.
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }
         .ok()
         .map_err(|error| format!("Could not initialize Windows launch services: {error}"))?;
     let _apartment = ShellApartment;
     let steam = plan.kind == "steam";
-    let install = if steam {
+    let directory = steam || plan.kind == "directory" || worker.is_some();
+    let install = if directory && !plan.install_dir.is_empty() {
         let path = std::fs::canonicalize(&plan.install_dir)
             .map_err(|error| format!("Game installation directory is unavailable: {error}"))?;
         if !path.is_dir() {
@@ -313,7 +376,9 @@ fn run(plan: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> Resu
     } else {
         String::new()
     };
-    let launch = if steam {
+    let launch = if worker.is_some() || plan.kind == "directory" {
+        plan.clone()
+    } else if steam {
         let client = steam_client()
             .ok_or("Steam's executable could not be found. Open Steam and try again.")?;
         steam_plan(client, &plan.steam_id)?
@@ -336,28 +401,67 @@ fn run(plan: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> Resu
     if cancel.load(Ordering::Relaxed) {
         return Ok(());
     }
-    let child = start_process(&launch)
-        .map_err(|error| format!("Could not start {}: {error}", launch.executable))?;
+    if plan.kind == "directory" && install.is_empty() {
+        return Err("Directory tracking requires an installation path.".into());
+    }
+    let child = if worker.is_none() {
+        Some(
+            start_process(&launch)
+                .map_err(|error| format!("Could not start {}: {error}", launch.executable))?,
+        )
+    } else {
+        None
+    };
     let mut tracked = HashSet::new();
-    if !steam {
-        tracked.insert(child.pid()?);
+    if let Some(pid) = plugin_pid.filter(|pid| *pid != 0) {
+        tracked.insert(pid);
+    }
+    if !directory {
+        tracked.insert(child.as_ref().unwrap().pid()?);
+    }
+    let mut started = !directory || worker.is_some();
+    if started {
         let _ = tx.send(LaunchEvent::Started);
     }
     let clock = Instant::now();
-    let mut started = plan.kind == "process";
     let mut uncovered = false;
-    let mut expired = false;
-    let mut next_lifecycle = clock;
+    let mut expired = pending_expired;
+    let mut next_lifecycle = clock + Duration::from_millis(plan.initial_delay.min(300_000));
     let mut failures = TrackingFailures::default();
     let mut readiness = Readiness::default();
     loop {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
+        if let Some(host) = &worker {
+            loop {
+                match host.events.try_recv() {
+                    Ok(crate::plugin::Event::Stopped) => {
+                        let _ = tx.send(LaunchEvent::Ended);
+                        return Ok(());
+                    }
+                    Ok(crate::plugin::Event::Error { message }) => return Err(message),
+                    Ok(_) => {}
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        return Err("Plugin worker stopped; the game is now untracked.".into());
+                    }
+                }
+            }
+        }
+        if !uncovered && !expired && pending.elapsed() > Duration::from_secs(90) {
+            expired = true;
+            let _ = tx.send(LaunchEvent::ReadinessExpired);
+        }
         let now = Instant::now();
         let lifecycle = now >= next_lifecycle;
         if lifecycle {
-            next_lifecycle = now + Duration::from_secs(2);
+            next_lifecycle = now
+                + Duration::from_millis(if plan.frequency == 0 {
+                    2000
+                } else {
+                    plan.frequency.clamp(100, 60_000)
+                });
         }
         let live = match processes() {
             Ok(live) => {
@@ -367,7 +471,7 @@ fn run(plan: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> Resu
                 live
             }
             Err(error) => {
-                if lifecycle && failures.observe(false) {
+                if worker.is_none() && lifecycle && failures.observe(false) {
                     return Err(format!(
                         "Process tracking failed; the game is now untracked: {error}"
                     ));
@@ -379,7 +483,7 @@ fn run(plan: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> Resu
         descendants(&live, &mut tracked);
         let game_pids: HashSet<u32> = live
             .iter()
-            .filter(|p| matches_game(p, &tracked, steam, &install))
+            .filter(|p| matches_game(p, &tracked, directory, &install))
             .map(|p| p.pid)
             .collect();
         let active = !game_pids.is_empty();
@@ -387,17 +491,14 @@ fn run(plan: &LaunchPlan, tx: &Sender<LaunchEvent>, cancel: &AtomicBool) -> Resu
             if let Some(hwnd) = readiness.update(ready_window(&game_pids), Instant::now()) {
                 uncovered = true;
                 let _ = tx.send(LaunchEvent::Ready(hwnd));
-            } else if !expired && clock.elapsed() > Duration::from_secs(90) {
-                expired = true;
-                let _ = tx.send(LaunchEvent::ReadinessExpired);
             }
         }
-        if lifecycle && active {
+        if worker.is_none() && lifecycle && active {
             if !started {
                 started = true;
                 let _ = tx.send(LaunchEvent::Started);
             }
-        } else if lifecycle && !active && started {
+        } else if worker.is_none() && lifecycle && !active && started {
             let _ = tx.send(LaunchEvent::Ended);
             break;
         }

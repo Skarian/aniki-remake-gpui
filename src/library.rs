@@ -26,6 +26,10 @@ pub struct LaunchPlan {
     pub install_dir: String,
     pub steam_id: String,
     pub error: String,
+    pub plugin: Option<crate::plugin::Request>,
+    pub url: bool,
+    pub initial_delay: u64,
+    pub frequency: u64,
 }
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 #[serde(default)]
@@ -209,10 +213,28 @@ pub fn launch_plan(
             "This game has Playnite scripts. Script execution is not yet supported by aniki-remake-gpui."
         )
     }
+    let provider = text(&g["PluginId"]);
+    let manifest = match provider.as_str() {
+        "cb91dfc9-b977-43bf-8e70-55f46e410fab" => Some("SteamLibrary_Builtin"),
+        "00000002-dbd1-46c6-b5d0-b1ba559d10e4" => Some("EpicGamesLibrary_Builtin"),
+        "aebe8b7c-6dc3-4a66-af31-e7375c6b5e9e" => Some("GogLibrary_Builtin"),
+        "7e4fbb5e-2ae3-48d4-8ba0-6b30e7a4e287" => Some("XboxLibrary_Builtin"),
+        "c2f038e5-8b92-4877-91f1-da9094155fc5" => Some("UplayLibrary_Builtin"),
+        "e3c26a3d-d695-4cb7-a769-5ff7612c7edd" => Some("BattlenetLibrary_Builtin"),
+        _ => None,
+    };
     let actions: Vec<_> = list(&g["GameActions"])
         .iter()
         .filter(|a| flag(&a["IsPlayAction"]))
         .collect();
+    if !actions.is_empty()
+        && manifest.is_some()
+        && g["IncludeLibraryPluginAction"].as_bool() == Some(true)
+    {
+        bail!(
+            "This game has both library and explicit play actions. Disable the library action in Playnite or keep only that action."
+        )
+    }
     if actions.len() > 1 {
         bail!("This game has multiple play actions; select a single action in Playnite for now.")
     }
@@ -337,19 +359,39 @@ pub fn launch_plan(
             other => bail!("Unsupported play action: {other}"),
         }
     }
-    if text(&g["PluginId"]) == "cb91dfc9-b977-43bf-8e70-55f46e410fab" {
-        let steam_id = text(&g["GameId"]);
-        if steam_id.is_empty() || !steam_id.bytes().all(|b| b.is_ascii_digit()) {
+    if g["IncludeLibraryPluginAction"].as_bool() == Some(false) {
+        bail!("This game's library play action is disabled in Playnite.")
+    }
+    if provider == "cb91dfc9-b977-43bf-8e70-55f46e410fab" {
+        let app = text(&g["GameId"]);
+        if app.is_empty() || !app.bytes().all(|b| b.is_ascii_digit()) {
             bail!("Invalid Steam app ID")
         }
-        return Ok(LaunchPlan {
-            kind: "steam".into(),
-            steam_id,
-            install_dir: install,
-            ..Default::default()
-        });
     }
-    bail!("No supported launch action. This library integration needs an adapter.")
+    let manifest = manifest.context("This library plugin is not supported by the DLL host yet.")?;
+    let folder = Path::new(root).join("Extensions").join(manifest);
+    let metadata: Value = serde_yaml::from_str(
+        &fs::read_to_string(folder.join("extension.yaml"))
+            .context("Install this game's library integration in Playnite first")?
+            .trim_start_matches('\u{feff}'),
+    )?;
+    let module = text(&metadata["Module"]);
+    if Path::new(&module).components().count() != 1 || !module.ends_with(".dll") {
+        bail!("Invalid library plugin module")
+    }
+    Ok(LaunchPlan {
+        kind: "plugin".into(),
+        install_dir: install.clone(),
+        plugin: Some(crate::plugin::Request {
+            root: root.into(),
+            module: folder.join(module).to_string_lossy().into(),
+            game: serde_json::json!({"Id":id(g), "PluginId":provider,
+                "Name":text(&g["Name"]), "GameId":text(&g["GameId"]),
+                "InstallDirectory":install, "IsInstalled":flag(&g["IsInstalled"]),
+                "Version":text(&g["Version"])}),
+        }),
+        ..Default::default()
+    })
 }
 fn asset_path(root: &Path, value: &Value) -> String {
     let p = text(value);
@@ -866,6 +908,49 @@ mod tests {
             id(&json!({"Id":"game-id"})),
             id(&json!({"_id":{"$guid":"game-id"}}))
         );
+    }
+    #[test]
+    fn installed_plugin_plan_preserves_identity_and_respects_disabled_action() {
+        let root = std::env::temp_dir().join(format!("aniki-plan-test-{}", std::process::id()));
+        let folder = root.join("Extensions/SteamLibrary_Builtin");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("extension.yaml"),
+            "\u{feff}Module: SteamLibrary.dll",
+        )
+        .unwrap();
+        let mut game = json!({"Id":"22222222-2222-2222-2222-222222222222", "PluginId":"cb91dfc9-b977-43bf-8e70-55f46e410fab", "GameId":"1868140", "InstallDirectory":"C:\\Games\\Dave", "IsInstalled":true});
+        let plan = launch_plan(&game, &[], root.to_str().unwrap(), "").unwrap();
+        assert_eq!(plan.kind, "plugin");
+        let request = plan.plugin.unwrap();
+        assert_eq!(request.game["GameId"], "1868140");
+        assert!(request.module.ends_with("SteamLibrary.dll"));
+        game["IncludeLibraryPluginAction"] = json!(false);
+        assert!(
+            launch_plan(&game, &[], root.to_str().unwrap(), "")
+                .unwrap_err()
+                .to_string()
+                .contains("disabled")
+        );
+        game["IncludeLibraryPluginAction"] = json!(true);
+        fs::write(folder.join("extension.yaml"), "Module: ../elsewhere.dll").unwrap();
+        assert!(launch_plan(&game, &[], root.to_str().unwrap(), "").is_err());
+        game["GameActions"] =
+            json!([{"Type":"File", "IsPlayAction":true, "Path":"C:\\Game\\game.exe"}]);
+        assert!(
+            launch_plan(&game, &[], root.to_str().unwrap(), "")
+                .unwrap_err()
+                .to_string()
+                .contains("both")
+        );
+        game["IncludeLibraryPluginAction"] = json!(false);
+        assert_eq!(
+            launch_plan(&game, &[], root.to_str().unwrap(), "")
+                .unwrap()
+                .kind,
+            "process"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn file_action_keeps_windows_argument_quoting() {

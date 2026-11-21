@@ -1,5 +1,6 @@
 $ErrorActionPreference='Stop'
 $root=$PSScriptRoot
+if(-not (Test-Path -LiteralPath (Join-Path $root 'importer\Aniki.PluginHost.dll'))){throw 'Missing plugin host. Run importer/build.ps1 first.'}
 $promptRoot=Join-Path $root 'assets\prompts'
 $prompts=Get-Content -LiteralPath (Join-Path $promptRoot 'SOURCE.json') -Raw | ConvertFrom-Json
 foreach($name in $prompts.files.PSObject.Properties.Name){
