@@ -87,6 +87,18 @@ def page(rows):
     frames=[json.loads(e['detail']) for e in rows if e['event']=='motion_frame']
     return frames[-1]['page'] if frames else None
 
+def assert_orbit_paused(game_hwnd):
+    # Allow the release event's redraw, then inspect any later redraws. A quiet
+    # retained scene is also correct; it must not need continuous rendering.
+    time.sleep(.3)
+    baseline=events()
+    latest=[json.loads(e['detail']) for e in baseline if e['event']=='motion_frame'][-1]
+    assert not latest['cover_active'] and not latest['active'],'Pause check requires a released, unfocused cover'
+    time.sleep(.8)
+    later=[json.loads(e['detail']) for e in events()[len(baseline):] if e['event']=='motion_frame']
+    assert u.GetForegroundWindow()==game_hwnd,'Game lost focus during animation pause check'
+    assert all(not f['cover_active'] and not f['active'] and f['status_frame']==latest['status_frame'] for f in later),'Oval kept advancing behind the game'
+
 results=report['cases']
 artwork={}
 if args.artwork_from_cache:
@@ -223,6 +235,7 @@ for family,mode in cases:
             if mode=='late':
                 wait(lambda r:any(e['event']=='readiness_timeout' for e in r),timeout=94)
                 assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Expiry retained topmost'
+                assert_orbit_paused(int(marker.read_text()))
             if mode=='delayed':
                 wait(lambda r:any(e['event']=='game_started' for e in r))
                 assert u.GetWindowLongW(hwnd,-20)&0x8,'Launcher uncovered during splash'
@@ -236,6 +249,12 @@ for family,mode in cases:
             rows=wait(lambda r:sum(e['event']=='focus_released' for e in r)==cycle+1)
             if mode=='delayed':
                 assert Path(str(marker)+'.ready').exists(),'Splash was mistaken for ready game'
+                # The fixture takes focus before its splash is ready. The visible
+                # topmost cover must keep animating during this exact interval.
+                frames=[json.loads(e['detail']) for e in rows if e['event']=='motion_frame']
+                covered=[f for f in frames if f['page']=='running' and f['cover_active'] and not f['active']]
+                assert len({f['status_frame'] for f in covered})>=10,'Loading oval froze while the game owned focus beneath the cover'
+                assert covered[-1]['sample_ms']-covered[0]['sample_ms']>=1000,'Insufficient unfocused-cover observation'
             assert owner.poll() is None and u.IsWindow(hwnd) and not u.IsIconic(hwnd)
             assert u.IsWindowVisible(hwnd)
             assert not (u.GetWindowLongW(hwnd,-20)&0x8),'Launcher stayed topmost over game'
@@ -246,6 +265,8 @@ for family,mode in cases:
             launches=[e for e in rows if e['event'] in ('status_presented','game_started')]
             assert [e['event'] for e in launches[-2:]]==['status_presented','game_started']
             wait(lambda r:page(r)=='running')
+            if mode in ('delayed','late'):
+                assert_orbit_paused(game_hwnd)
             if mode=='minimized-return':
                 u.ShowWindow(c.c_void_p(hwnd),6)
                 wait(lambda _:u.IsIconic(hwnd))

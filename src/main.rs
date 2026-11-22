@@ -81,6 +81,7 @@ struct GameSession {
     game: Game,
     pending: Option<mpsc::Sender<launch::LaunchEvent>>,
     frame_queued: bool,
+    cover_active: bool,
     requested: Instant,
     automatic_return: bool,
     ended: bool,
@@ -401,6 +402,7 @@ impl Launcher {
             game: game.clone(),
             pending: Some(tx),
             frame_queued: false,
+            cover_active: true,
             requested: Instant::now(),
             automatic_return: true,
             ended: false,
@@ -550,6 +552,7 @@ impl Launcher {
                     focus::release(window);
                 } else if let Some(session) = &mut self.session {
                     session.automatic_return = false;
+                    session.cover_active = false;
                     focus::release(window);
                 }
                 self.phase = Phase::Library;
@@ -798,7 +801,9 @@ impl Launcher {
         let animation = self.start.elapsed().as_millis() as u64 / 33;
         if animation != self.animation_frame
             && (self.is_loading() || self.phase == Phase::Running)
-            && window.is_window_active()
+            // The game can take focus while our topmost cover is still visible.
+            && (window.is_window_active()
+                || self.session.as_ref().is_some_and(|s| s.cover_active))
         {
             self.animation_frame = animation;
             cx.notify();
@@ -944,6 +949,7 @@ impl Launcher {
                                 .as_ref()
                                 .is_some_and(|s| s.automatic_return && !s.ended)
                         {
+                            self.session.as_mut().unwrap().cover_active = false;
                             if !focus::handoff(window, hwnd) {
                                 log(
                                     &self.base,
@@ -962,6 +968,9 @@ impl Launcher {
                         log(&self.base, "game_ready", &hwnd.to_string(), self.start);
                     }
                     launch::LaunchEvent::ReadinessExpired => {
+                        if let Some(session) = &mut self.session {
+                            session.cover_active = false;
+                        }
                         focus::release(window);
                         log(
                             &self.base,
@@ -1425,6 +1434,8 @@ impl Render for Launcher {
                 "platform":self.platform_motion.value(now), "platform_target":self.platform,
                 "artwork":self.background_motion.value(now), "video":self.video_motion.value(now),
                 "page":page, "page_progress":self.page_motion.smooth_value(now),
+                "status_frame":self.animation_frame, "active":window.is_window_active(),
+                "cover_active":self.session.as_ref().is_some_and(|s| s.cover_active),
                 "sample_ms":now.duration_since(self.start).as_secs_f64()*1000.,
                 "menu":self.menu, "details_action":self.details_action
             }).to_string(), self.start);
