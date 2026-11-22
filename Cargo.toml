@@ -33,3 +33,7 @@ gpui = { path = "vendor/gpui" }
 [[example]]
 name = "launch_probe"
 path = "tests/launch_probe.rs"
+
+[[example]]
+name = "dpi_probe"
+path = "tests/dpi_probe.rs"

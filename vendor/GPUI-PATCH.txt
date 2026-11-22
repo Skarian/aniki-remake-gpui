@@ -25,3 +25,10 @@ for the same HWND and resumes the existing Details page.
 
 No atlas allocator changes, rendering-quality changes, or video backend rewrite.
 The app's foreground-restore path reveals the prepared UI when the game exits.
+
+Local change, 2026-11-22:
+- After WM_DPICHANGED, synchronize the logical viewport and renderer with the
+  actual client rectangle even if SetWindowPos did not emit WM_SIZE. Otherwise
+  an unchanged physical window can retain its previous logical size and crop
+  the UI at the new DPI. Minimized windows retain the existing 1x1 behavior.
+  Regression probe: cargo run --example dpi_probe (hidden window, no display changes).

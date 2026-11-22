@@ -780,7 +780,6 @@ impl WindowsWindowInner {
     ) -> Option<isize> {
         let new_dpi = wparam.loword() as f32;
         let mut lock = self.state.borrow_mut();
-        let is_maximized = lock.is_maximized();
         let new_scale_factor = new_dpi / USER_DEFAULT_SCREEN_DPI as f32;
         lock.scale_factor = new_scale_factor;
         lock.border_offset.update(handle).log_err();
@@ -789,9 +788,8 @@ impl WindowsWindowInner {
         let rect = unsafe { &*(lparam.0 as *const RECT) };
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
-        // this will emit `WM_SIZE` and `WM_MOVE` right here
-        // even before this function returns
-        // the new size is handled in `WM_SIZE`
+        // This can emit WM_SIZE synchronously, but not when the physical size
+        // stays unchanged. DPI still changes the logical viewport in that case.
         unsafe {
             SetWindowPos(
                 handle,
@@ -806,11 +804,18 @@ impl WindowsWindowInner {
             .log_err();
         }
 
-        // When maximized, SetWindowPos doesn't send WM_SIZE, so we need to manually
-        // update the size and call the resize callback
-        if is_maximized {
-            let device_size = size(DevicePixels(width), DevicePixels(height));
-            self.handle_size_change(device_size, new_scale_factor, true);
+        // Synchronize from the actual client area, not the suggested outer rect.
+        // Preserve the minimized 1x1 renderer; WM_SIZE restores it later.
+        if !unsafe { IsIconic(handle) }.as_bool() {
+            let mut client = RECT::default();
+            match unsafe { GetClientRect(handle, &mut client) } {
+                Ok(()) => self.handle_size_change(
+                    size(DevicePixels(client.right - client.left), DevicePixels(client.bottom - client.top)),
+                    new_scale_factor,
+                    true,
+                ),
+                Err(error) => log::error!("unable to read client size after dpi change: {error}"),
+            }
         }
 
         Some(0)
