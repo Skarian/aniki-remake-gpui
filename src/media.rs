@@ -216,6 +216,45 @@ fn video_size(
 
 #[cfg(test)]
 mod video_tests {
+    #[test]
+    #[ignore = "Requires ANIKI_TEST_FFMPEG; silent SDL dummy driver, single test thread"]
+    fn static_sdl_audio_queues_decoded_samples() {
+        use super::*;
+        unsafe {
+            sdl2_sys::SDL_SetMainReady();
+            assert!(
+                sdl2_sys::SDL_SetHint(c"SDL_AUDIODRIVER".as_ptr(), c"dummy".as_ptr())
+                    == sdl2_sys::SDL_bool::SDL_TRUE
+            );
+        }
+        let ffmpeg = std::env::var("ANIKI_TEST_FFMPEG").unwrap();
+        let wav = std::env::temp_dir().join(format!("aniki-sdl-audio-{}.wav", std::process::id()));
+        let generated = Command::new(&ffmpeg)
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=stereo",
+                "-t",
+                "0.2",
+                "-y",
+            ])
+            .arg(&wav)
+            .creation_flags(0x08000000)
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let audio = TrailerAudio::start(&ffmpeg, wav.to_str().unwrap()).unwrap();
+        let status = audio
+            .status
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        drop(audio);
+        std::fs::remove_file(wav).unwrap();
+        assert_eq!(status, "playing; 48000 Hz stereo PCM queued");
+    }
     use super::*;
 
     #[test]
@@ -305,7 +344,7 @@ pub struct Music {
     pub status: mpsc::Receiver<String>,
 }
 impl Music {
-    pub fn new(sdl: std::path::PathBuf, ffmpeg: String) -> Self {
+    pub fn new(ffmpeg: String) -> Self {
         let (tx, rx) = mpsc::channel::<(String, u32)>();
         let (status_tx, status) = mpsc::channel();
         thread::spawn(move || {
@@ -320,13 +359,7 @@ impl Music {
                         // Close the old SDL queue before opening another track.
                         drop(audio.take());
                         if !path.is_empty() {
-                            audio = TrailerAudio::open(
-                                &sdl,
-                                &ffmpeg,
-                                &path,
-                                true,
-                                volume as f32 / 1000.,
-                            );
+                            audio = TrailerAudio::open(&ffmpeg, &path, true, volume as f32 / 1000.);
                             if audio.is_none() {
                                 let _ = status_tx.send("Music decoder could not start".into());
                             }
@@ -362,23 +395,11 @@ pub struct TrailerAudio {
     worker: Option<thread::JoinHandle<()>>,
     pub status: mpsc::Receiver<&'static str>,
 }
-#[repr(C)]
-struct AudioSpec {
-    freq: i32,
-    format: u16,
-    channels: u8,
-    silence: u8,
-    samples: u16,
-    padding: u16,
-    size: u32,
-    callback: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut u8, i32)>,
-    userdata: *mut std::ffi::c_void,
-}
 impl TrailerAudio {
-    pub fn start(sdl: &Path, ffmpeg: &str, path: &str) -> Option<Self> {
-        Self::open(sdl, ffmpeg, path, false, 1.)
+    pub fn start(ffmpeg: &str, path: &str) -> Option<Self> {
+        Self::open(ffmpeg, path, false, 1.)
     }
-    fn open(sdl: &Path, ffmpeg: &str, path: &str, looping: bool, volume: f32) -> Option<Self> {
+    fn open(ffmpeg: &str, path: &str, looping: bool, volume: f32) -> Option<Self> {
         if !Path::new(path).is_file() {
             return None;
         }
@@ -417,41 +438,15 @@ impl TrailerAudio {
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopped = stop.clone();
         let (status_tx, status) = mpsc::channel();
-        let sdl = sdl.to_path_buf();
         let worker = thread::spawn(move || {
+            use sdl2_sys::{
+                SDL_AudioSpec as AudioSpec, SDL_CloseAudioDevice as close,
+                SDL_GetQueuedAudioSize as queued, SDL_InitSubSystem as init,
+                SDL_OpenAudioDevice as open, SDL_PauseAudioDevice as pause,
+                SDL_QueueAudio as queue, SDL_QuitSubSystem as quit,
+            };
             use std::sync::atomic::Ordering;
-            // SDL2 ABI: https://wiki.libsdl.org/SDL2/SDL_AudioSpec
             unsafe {
-                let Ok(lib) = libloading::Library::new(sdl) else {
-                    return;
-                };
-                macro_rules! symbol {
-                    ($name:literal, $ty:ty) => {
-                        match lib.get::<$ty>(concat!($name, "\0").as_bytes()) {
-                            Ok(f) => *f,
-                            Err(_) => return,
-                        }
-                    };
-                }
-                let init = symbol!("SDL_InitSubSystem", unsafe extern "C" fn(u32) -> i32);
-                let quit = symbol!("SDL_QuitSubSystem", unsafe extern "C" fn(u32));
-                let open = symbol!(
-                    "SDL_OpenAudioDevice",
-                    unsafe extern "C" fn(
-                        *const i8,
-                        i32,
-                        *const AudioSpec,
-                        *mut AudioSpec,
-                        i32,
-                    ) -> u32
-                );
-                let close = symbol!("SDL_CloseAudioDevice", unsafe extern "C" fn(u32));
-                let queue = symbol!(
-                    "SDL_QueueAudio",
-                    unsafe extern "C" fn(u32, *const u8, u32) -> i32
-                );
-                let queued = symbol!("SDL_GetQueuedAudioSize", unsafe extern "C" fn(u32) -> u32);
-                let pause = symbol!("SDL_PauseAudioDevice", unsafe extern "C" fn(u32, i32));
                 if init(0x10) != 0 {
                     let _ = status_tx.send("SDL audio initialization failed");
                     return;
@@ -489,7 +484,9 @@ impl TrailerAudio {
                         Ok(n) => {
                             let total = remainder + n;
                             let aligned = total / 4 * 4;
-                            if aligned > 0 && queue(device, bytes.as_ptr(), aligned as u32) != 0 {
+                            if aligned > 0
+                                && queue(device, bytes.as_ptr().cast(), aligned as u32) != 0
+                            {
                                 break;
                             }
                             remainder = total - aligned;

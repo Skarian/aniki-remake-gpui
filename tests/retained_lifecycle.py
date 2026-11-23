@@ -31,7 +31,6 @@ result_path.write_text(json.dumps(report,indent=2))
 print(f'Results: {result_path}',flush=True)
 shutil.copy2(binary,app/'aniki-remake-gpui.exe')
 assert hashlib.sha256((app/'aniki-remake-gpui.exe').read_bytes()).hexdigest()==digest
-shutil.copy2(root/'SDL2.dll',app/'SDL2.dll')
 shutil.copytree(root/'assets',app/'assets',dirs_exist_ok=True)
 report['fixture_source']=str(args.fixture_source.resolve())
 report['fixture_sha256']=hashlib.sha256(args.fixture_source.read_bytes()).hexdigest()

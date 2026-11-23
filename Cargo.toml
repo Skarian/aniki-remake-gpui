@@ -5,7 +5,7 @@ edition = "2024"
 description = "A fast standalone fullscreen launcher for a Playnite library"
 
 [dependencies]
-libloading = "0.8.9"
+sdl2-sys = { version = "=0.39.0", features = ["bundled", "static-link"] }
 raw-window-handle = "0.6"
 gpui = "=0.2.2"
 serde = { version = "1", features = ["derive"] }

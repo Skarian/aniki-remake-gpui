@@ -39,14 +39,25 @@ This is a bounded compatibility layer, not a complete Playnite host. Custom
 plugin UI, scripts, action choosers, lifecycle hooks from unrelated extensions,
 database edits and playtime writeback are outside its scope. Explicit emulator
 and executable actions retain the existing path. Legacy cached Steam plans keep
-their native fallback until refreshed. This version uses the current combined
-Playnite installation/data root layout.
+their native fallback until refreshed. This version supports separate
+Playnite program/data/library folders through three JSON paths: `playnite_root`,
+`playnite_data_root`, and optional `playnite_library_path`. Empty optional paths
+preserve the portable defaults. Program assemblies and `{PlayniteDir}` come
+from the program root; plugin settings and extra media come from the data root.
+User-installed plugins take precedence over program-folder copies. Relative
+artwork paths use the selected library's `files` folder. The live exporter also
+records its actual configuration and database paths.
 
 ## Build and tests
 
 Run `importer/build.ps1 -PlayniteRoot <root>` and the normal Rust build. Package
 `importer/Aniki.PluginHost.dll` beside the existing importer files. There is one
 product exe, with a managed adapter DLL, rather than a second helper executable.
+
+Playnite SDK, LiteDB, Newtonsoft.Json and storefront DLLs are user-provided and
+are not packaged. The importer resolves its assemblies from the supplied program
+root at runtime, so it needs no copied Playnite DLLs beside it. `-OutputDirectory`
+on the importer build script can stage our own helper files separately.
 
 ```powershell
 .\build.ps1 -Test

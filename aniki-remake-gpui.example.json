@@ -1,5 +1,7 @@
 {
   "playnite_root": "D:\\Playnite",
+  "playnite_data_root": "",
+  "playnite_library_path": "",
   "fullscreen": true,
   "music": true,
   "video": true,

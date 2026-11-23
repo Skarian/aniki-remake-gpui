@@ -62,6 +62,8 @@ pub struct Library {
 #[serde(default)]
 pub struct Config {
     pub playnite_root: String,
+    pub playnite_data_root: String,
+    pub playnite_library_path: String,
     pub fullscreen: bool,
     pub music: bool,
     pub video: bool,
@@ -75,6 +77,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             playnite_root: r"D:\Playnite".into(),
+            playnite_data_root: String::new(),
+            playnite_library_path: String::new(),
             fullscreen: true,
             music: true,
             video: true,
@@ -86,6 +90,29 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub fn ffmpeg_path(&self, base: &Path) -> String {
+        if self.ffmpeg.is_empty() {
+            base.join("tools/ffmpeg/bin/ffmpeg.exe")
+                .to_string_lossy()
+                .into()
+        } else {
+            self.ffmpeg.clone()
+        }
+    }
+    pub fn data_root(&self) -> &str {
+        if self.playnite_data_root.is_empty() {
+            &self.playnite_root
+        } else {
+            &self.playnite_data_root
+        }
+    }
+    pub fn library_path(&self) -> PathBuf {
+        if self.playnite_library_path.is_empty() {
+            Path::new(self.data_root()).join("library")
+        } else {
+            PathBuf::from(&self.playnite_library_path)
+        }
+    }
     pub fn parse(bytes: &[u8]) -> serde_json::Result<Self> {
         serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
     }
@@ -204,6 +231,7 @@ pub fn launch_plan(
     g: &Value,
     emulators: &[Value],
     root: &str,
+    data_root: &str,
     platform: &str,
 ) -> Result<LaunchPlan> {
     let ex = |s: &str| expand(s, g, root, "", None, platform);
@@ -369,7 +397,13 @@ pub fn launch_plan(
         }
     }
     let manifest = manifest.context("This library plugin is not supported by the DLL host yet.")?;
-    let folder = Path::new(root).join("Extensions").join(manifest);
+    // Playnite gives user-installed extensions precedence over program copies.
+    let user = Path::new(data_root).join("Extensions").join(manifest);
+    let folder = if user.join("extension.yaml").is_file() {
+        user
+    } else {
+        Path::new(root).join("Extensions").join(manifest)
+    };
     let metadata: Value = serde_yaml::from_str(
         &fs::read_to_string(folder.join("extension.yaml"))
             .context("Install this game's library integration in Playnite first")?
@@ -384,6 +418,7 @@ pub fn launch_plan(
         install_dir: install.clone(),
         plugin: Some(crate::plugin::Request {
             root: root.into(),
+            data_root: data_root.into(),
             module: folder.join(module).to_string_lossy().into(),
             game: serde_json::json!({"Id":id(g), "PluginId":provider,
                 "Name":text(&g["Name"]), "GameId":text(&g["GameId"]),
@@ -393,7 +428,7 @@ pub fn launch_plan(
         ..Default::default()
     })
 }
-fn asset_path(root: &Path, value: &Value) -> String {
+fn asset_path(library: &Path, value: &Value) -> String {
     let p = text(value);
     if p.is_empty() {
         return p;
@@ -401,7 +436,7 @@ fn asset_path(root: &Path, value: &Value) -> String {
     if Path::new(&p).is_absolute() {
         p
     } else {
-        root.join("library/files").join(p).to_string_lossy().into()
+        library.join("files").join(p).to_string_lossy().into()
     }
 }
 fn first_media(dir: &Path, exts: &[&str]) -> String {
@@ -430,7 +465,15 @@ fn present(path: PathBuf) -> String {
 }
 pub fn normalize(raw: &Value) -> Library {
     let root = text(&raw["root"]);
-    let rootpath = Path::new(&root);
+    let data = text(&raw["data_root"]);
+    let data = if data.is_empty() { &root } else { &data };
+    let rootpath = Path::new(data);
+    let library = text(&raw["library"]);
+    let library = if library.is_empty() {
+        rootpath.join("library")
+    } else {
+        PathBuf::from(library)
+    };
     let c = &raw["collections"];
     let lookup = |table: &str| -> HashMap<String, String> {
         list(&c[table])
@@ -487,8 +530,8 @@ pub fn normalize(raw: &Value) -> Library {
                 .or_else(|| text(&g["Playtime"]["$numberLong"]).parse().ok())
                 .unwrap_or(0),
             last_activity: text(&g["LastActivity"]),
-            cover: asset_path(rootpath, &g["CoverImage"]),
-            background: asset_path(rootpath, &g["BackgroundImage"]),
+            cover: asset_path(&library, &g["CoverImage"]),
+            background: asset_path(&library, &g["BackgroundImage"]),
             logo: present(extra.join("Logo.png")),
             video: present(extra.join("VideoTrailer.mp4")),
             music: first_media(
@@ -496,12 +539,12 @@ pub fn normalize(raw: &Value) -> Library {
                 &["mp3", "wav", "wma"],
             ),
             favorite: flag(&g["Favorite"]),
-            launch: launch_plan(g, list(&c["emulators"]), &root, &platform).unwrap_or_else(|e| {
-                LaunchPlan {
+            launch: launch_plan(g, list(&c["emulators"]), &root, data, &platform).unwrap_or_else(
+                |e| LaunchPlan {
                     error: e.to_string(),
                     ..Default::default()
-                }
-            }),
+                },
+            ),
         });
     }
     games.sort_by(|a, b| {
@@ -512,12 +555,17 @@ pub fn normalize(raw: &Value) -> Library {
     Library {
         games,
         exported_utc: text(&raw["exported_utc"]),
-        platform_art: platform_art(rootpath, list(&c["platforms"])),
+        platform_art: platform_art(Path::new(&root), rootpath, &library, list(&c["platforms"])),
     }
 }
 // Same precedence as Aniki's FilterPresetSelector: user folder, theme, then
 // Playnite's platform icon. Resolve in the refresh worker, never in render.
-fn platform_art(root: &Path, platforms: &[Value]) -> HashMap<String, String> {
+fn platform_art(
+    program: &Path,
+    root: &Path,
+    library: &Path,
+    platforms: &[Value],
+) -> HashMap<String, String> {
     let read_json = |path: PathBuf| -> Value {
         fs::read(path)
             .ok()
@@ -532,10 +580,14 @@ fn platform_art(root: &Path, platforms: &[Value]) -> HashMap<String, String> {
         .join("Themes/Fullscreen")
         .join(text(&settings["Theme"]))
         .join("Icons/Filter");
+    let builtin_theme = program
+        .join("Themes/Fullscreen")
+        .join(text(&settings["Theme"]))
+        .join("Icons/Filter");
     let mut result = HashMap::new();
     let entries = platforms
         .iter()
-        .map(|p| (text(&p["Name"]), asset_path(root, &p["Icon"])))
+        .map(|p| (text(&p["Name"]), asset_path(library, &p["Icon"])))
         .chain([
             ("All games".into(), String::new()),
             ("Favorites".into(), String::new()),
@@ -551,7 +603,10 @@ fn platform_art(root: &Path, platforms: &[Value]) -> HashMap<String, String> {
         } else {
             present(Path::new(&custom).join(format!("{filename}.png")))
         };
-        let themed = present(theme.join(format!("{filename}.png")));
+        let mut themed = present(theme.join(format!("{filename}.png")));
+        if themed.is_empty() {
+            themed = present(builtin_theme.join(format!("{filename}.png")));
+        }
         let path = if !user.is_empty() {
             user
         } else if !themed.is_empty() {
@@ -597,9 +652,9 @@ fn stamp(path: &Path) -> String {
         .map(|m| format!("{}:{:?}", m.len(), m.modified()))
         .unwrap_or_default()
 }
-pub fn fingerprint(root: &Path) -> String {
+pub fn fingerprint(library: &Path) -> String {
     let mut v = Vec::new();
-    if let Ok(entries) = fs::read_dir(root.join("library")) {
+    if let Ok(entries) = fs::read_dir(library) {
         for e in entries.flatten() {
             if e.path().extension().is_some_and(|x| x == "db") {
                 v.push(format!("{}:{}", e.path().display(), stamp(&e.path())));
@@ -609,7 +664,7 @@ pub fn fingerprint(root: &Path) -> String {
     v.sort();
     v.join("|")
 }
-fn media_fingerprint(root: &Path) -> String {
+fn media_fingerprint(root: &Path, library: &Path) -> String {
     // Metadata queries only: never hash or copy movie/music contents during refresh.
     fn visit(dir: &Path, depth: u8, out: &mut Vec<String>) {
         if let Ok(entries) = fs::read_dir(dir) {
@@ -624,13 +679,10 @@ fn media_fingerprint(root: &Path) -> String {
         }
     }
     let mut entries = Vec::new();
-    for dir in [
-        "ExtraMetadata/games",
-        "ExtraMetadata/UniPlaySong/Games",
-        "library/files",
-    ] {
+    for dir in ["ExtraMetadata/games", "ExtraMetadata/UniPlaySong/Games"] {
         visit(&root.join(dir), 1, &mut entries);
     }
+    visit(&library.join("files"), 1, &mut entries);
     entries.sort();
     entries.join("|")
 }
@@ -730,7 +782,14 @@ pub fn start_refresh(base: PathBuf, config: Config, tx: Sender<Update>, paused: 
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }
-            let db = fingerprint(Path::new(&config.playnite_root));
+            let library = config.library_path();
+            let db = format!(
+                "paths-v2|{}|{}|{}|{}",
+                config.playnite_root,
+                config.data_root(),
+                library.display(),
+                fingerprint(&library)
+            );
             let live_stamp = stamp(&live);
             let mut source = preferred_source.clone();
             let mut changed = false;
@@ -746,6 +805,8 @@ pub fn start_refresh(base: PathBuf, config: Config, tx: Sender<Update>, paused: 
                     let result = Command::new(base.join("importer/Aniki.Import.exe"))
                         .arg(&config.playnite_root)
                         .arg(&raw)
+                        .arg(&library)
+                        .arg(config.data_root())
                         .creation_flags(0x08000000)
                         .output();
                     match result {
@@ -756,11 +817,13 @@ pub fn start_refresh(base: PathBuf, config: Config, tx: Sender<Update>, paused: 
                             last_db = db;
                             changed = true;
                         }
-                        _ => {
+                        failure => {
                             retry = 4;
-                            let _ = tx.send(Update::Status(
-                                "Using saved library · waiting for Playnite export".into(),
-                            ));
+                            let error = match failure {
+                                Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                                Err(error) => error.to_string(),
+                            };
+                            let _ = tx.send(Update::Status(format!("Library import failed: {error}")));
                         }
                     }
                 }
@@ -770,7 +833,7 @@ pub fn start_refresh(base: PathBuf, config: Config, tx: Sender<Update>, paused: 
                 last_raw = rs;
                 changed = true;
             }
-            let media = media_fingerprint(Path::new(&config.playnite_root));
+            let media = media_fingerprint(Path::new(config.data_root()), &library);
             if media != last_media {
                 last_media = media;
                 changed = true;
@@ -803,6 +866,87 @@ pub fn start_refresh(base: PathBuf, config: Config, tx: Sender<Update>, paused: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn portable_config_keeps_existing_paths_and_split_config_overrides_them() {
+        let mut config = Config::parse(br#"{"playnite_root":"C:\\Playnite"}"#).unwrap();
+        assert_eq!(config.data_root(), r"C:\Playnite");
+        assert_eq!(config.library_path(), Path::new(r"C:\Playnite\library"));
+        config.playnite_data_root = r"C:\Users\Player\AppData\Roaming\Playnite".into();
+        assert_eq!(
+            config.library_path(),
+            Path::new(config.data_root()).join("library")
+        );
+        config.playnite_library_path = r"E:\My Library".into();
+        assert_eq!(config.library_path(), Path::new(r"E:\My Library"));
+        let package = Path::new(r"C:\Launcher");
+        assert_eq!(
+            Path::new(&config.ffmpeg_path(package)),
+            package.join("tools/ffmpeg/bin/ffmpeg.exe")
+        );
+        assert!(
+            config.ffmpeg.is_empty(),
+            "Resolving a tool must not save an absolute package path"
+        );
+        config.ffmpeg = r"D:\Custom\ffmpeg.exe".into();
+        assert_eq!(config.ffmpeg_path(package), config.ffmpeg);
+    }
+
+    #[test]
+    fn split_layout_resolves_plugin_media_theme_and_program_variables() {
+        let base = std::env::temp_dir().join(format!("aniki-split-layout-{}", std::process::id()));
+        let program = base.join("Program Files/Playnite");
+        let data = base.join("User Data/Playnite");
+        let library = base.join("Custom Library");
+        let manifest = "Extensions/SteamLibrary_Builtin";
+        for (root, module) in [(&program, "Old.dll"), (&data, "New.dll")] {
+            fs::create_dir_all(root.join(manifest)).unwrap();
+            fs::write(
+                root.join(manifest).join("extension.yaml"),
+                format!("Module: {module}"),
+            )
+            .unwrap();
+        }
+        let extra = data.join("ExtraMetadata/games/game-id");
+        fs::create_dir_all(&extra).unwrap();
+        for name in ["Logo.png", "VideoTrailer.mp4"] {
+            fs::write(extra.join(name), b"fixture").unwrap();
+        }
+        let music = data.join("ExtraMetadata/UniPlaySong/Games/game-id");
+        fs::create_dir_all(&music).unwrap();
+        fs::write(music.join("track.mp3"), b"fixture").unwrap();
+        fs::create_dir_all(data.join("Themes/Fullscreen/Test/Icons/Filter")).unwrap();
+        fs::write(data.join("fullscreenConfig.json"), br#"{"Theme":"Test"}"#).unwrap();
+        let icon = data.join("Themes/Fullscreen/Test/Icons/Filter/All Games.png");
+        fs::write(&icon, b"fixture").unwrap();
+        let raw = json!({"root":program, "data_root":data, "library":library, "collections":{"games":[{
+            "Id":"game-id", "IsInstalled":true, "PluginId":"cb91dfc9-b977-43bf-8e70-55f46e410fab",
+            "GameId":"1868140", "InstallDirectory":"{PlayniteDir}\\Games", "CoverImage":"cover.png",
+            "BackgroundImage":"C:\\External\\background.png"
+        }]}});
+        let normalized = normalize(&raw);
+        let game = &normalized.games[0];
+        assert_eq!(Path::new(&game.cover), library.join("files/cover.png"));
+        assert_eq!(game.background, r"C:\External\background.png");
+        assert_eq!(Path::new(&game.logo), extra.join("Logo.png"));
+        assert_eq!(Path::new(&game.video), extra.join("VideoTrailer.mp4"));
+        assert_eq!(Path::new(&game.music), music.join("track.mp3"));
+        assert_eq!(Path::new(&normalized.platform_art["All games"]), icon);
+        let request = game.launch.plugin.as_ref().unwrap();
+        assert_eq!(Path::new(&request.root), program);
+        assert_eq!(Path::new(&request.data_root), data);
+        assert_eq!(
+            Path::new(&request.module),
+            data.join(manifest).join("New.dll")
+        );
+        assert_eq!(Path::new(&game.launch.install_dir), program.join("Games"));
+        fs::remove_file(data.join(manifest).join("extension.yaml")).unwrap();
+        let fallback = normalize(&raw);
+        assert_eq!(
+            Path::new(&fallback.games[0].launch.plugin.as_ref().unwrap().module),
+            program.join(manifest).join("Old.dll")
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
     use super::*;
     #[test]
     fn windows_utf8_bom_preserves_media_configuration() {
@@ -863,11 +1007,11 @@ mod tests {
     }
     #[test]
     fn rejects_unknown_integration() {
-        assert!(launch_plan(&json!({"PluginId":"unknown"}), &[], "", "").is_err());
+        assert!(launch_plan(&json!({"PluginId":"unknown"}), &[], "", "", "").is_err());
     }
     #[test]
     fn rejects_scripts_instead_of_silent_skip() {
-        assert!(launch_plan(&json!({"GameStartingScript":"do stuff"}), &[], "", "").is_err());
+        assert!(launch_plan(&json!({"GameStartingScript":"do stuff"}), &[], "", "", "").is_err());
     }
     #[test]
     fn validates_steam_id() {
@@ -875,6 +1019,7 @@ mod tests {
             launch_plan(
                 &json!({"PluginId":"cb91dfc9-b977-43bf-8e70-55f46e410fab","GameId":"1 & bad"}),
                 &[],
+                "",
                 "",
                 ""
             )
@@ -890,14 +1035,14 @@ mod tests {
         fs::write(&rom, b"fixture").unwrap();
         let mut g = json!({"Roms":[{"Path":rom}],"GameActions":[{"Type":"Emulator","IsPlayAction":true,"EmulatorId":"emu","EmulatorProfileId":"profile","AdditionalArguments":"--fullscreen"}]});
         let em = json!({"Id":"emu","InstallDir":dir,"CustomProfiles":[{"Id":"profile","Executable":"{EmulatorDir}\\emu.exe","Arguments":"-g \"{ImagePath}\"","WorkingDirectory":"{EmulatorDir}"}]});
-        let plan = launch_plan(&g, &[em.clone()], "", "").unwrap();
+        let plan = launch_plan(&g, &[em.clone()], "", "", "").unwrap();
         assert_eq!(
             plan.arguments,
             format!("-g \"{}\" --fullscreen", rom.display())
         );
         g["GameActions"][0]["OverrideDefaultArgs"] = json!(true);
         g["GameActions"][0]["Arguments"] = json!("--custom \"{ImagePath}\"");
-        let plan = launch_plan(&g, &[em], "", "").unwrap();
+        let plan = launch_plan(&g, &[em], "", "", "").unwrap();
         assert_eq!(plan.arguments, format!("--custom \"{}\"", rom.display()));
         fs::remove_file(rom).unwrap();
         fs::remove_dir(dir).unwrap();
@@ -920,34 +1065,68 @@ mod tests {
         )
         .unwrap();
         let mut game = json!({"Id":"22222222-2222-2222-2222-222222222222", "PluginId":"cb91dfc9-b977-43bf-8e70-55f46e410fab", "GameId":"1868140", "InstallDirectory":"C:\\Games\\Dave", "IsInstalled":true});
-        let plan = launch_plan(&game, &[], root.to_str().unwrap(), "").unwrap();
+        let plan = launch_plan(
+            &game,
+            &[],
+            root.to_str().unwrap(),
+            root.to_str().unwrap(),
+            "",
+        )
+        .unwrap();
         assert_eq!(plan.kind, "plugin");
         let request = plan.plugin.unwrap();
         assert_eq!(request.game["GameId"], "1868140");
         assert!(request.module.ends_with("SteamLibrary.dll"));
         game["IncludeLibraryPluginAction"] = json!(false);
         assert!(
-            launch_plan(&game, &[], root.to_str().unwrap(), "")
-                .unwrap_err()
-                .to_string()
-                .contains("disabled")
+            launch_plan(
+                &game,
+                &[],
+                root.to_str().unwrap(),
+                root.to_str().unwrap(),
+                ""
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("disabled")
         );
         game["IncludeLibraryPluginAction"] = json!(true);
         fs::write(folder.join("extension.yaml"), "Module: ../elsewhere.dll").unwrap();
-        assert!(launch_plan(&game, &[], root.to_str().unwrap(), "").is_err());
+        assert!(
+            launch_plan(
+                &game,
+                &[],
+                root.to_str().unwrap(),
+                root.to_str().unwrap(),
+                ""
+            )
+            .is_err()
+        );
         game["GameActions"] =
             json!([{"Type":"File", "IsPlayAction":true, "Path":"C:\\Game\\game.exe"}]);
         assert!(
-            launch_plan(&game, &[], root.to_str().unwrap(), "")
-                .unwrap_err()
-                .to_string()
-                .contains("both")
+            launch_plan(
+                &game,
+                &[],
+                root.to_str().unwrap(),
+                root.to_str().unwrap(),
+                ""
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("both")
         );
         game["IncludeLibraryPluginAction"] = json!(false);
         assert_eq!(
-            launch_plan(&game, &[], root.to_str().unwrap(), "")
-                .unwrap()
-                .kind,
+            launch_plan(
+                &game,
+                &[],
+                root.to_str().unwrap(),
+                root.to_str().unwrap(),
+                ""
+            )
+            .unwrap()
+            .kind,
             "process"
         );
         fs::remove_dir_all(root).unwrap();
@@ -955,7 +1134,7 @@ mod tests {
     #[test]
     fn file_action_keeps_windows_argument_quoting() {
         let g = json!({"InstallDirectory":"D:\\Game Folder","GameActions":[{"Type":"File","IsPlayAction":true,"Path":"{InstallDir}\\game.exe","Arguments":"--name \"two words\" --value &literal"}]});
-        let p = launch_plan(&g, &[], "", "").unwrap();
+        let p = launch_plan(&g, &[], "", "", "").unwrap();
         assert_eq!(p.executable, r"D:\Game Folder\game.exe");
         assert_eq!(p.arguments, "--name \"two words\" --value &literal");
         assert_eq!(p.working_dir, r"D:\Game Folder");

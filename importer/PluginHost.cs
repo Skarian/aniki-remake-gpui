@@ -17,7 +17,7 @@ using Newtonsoft.Json.Linq;
 using Newtonsoft.Json.Serialization;
 
 public static class AnikiPluginHost {
-    internal static string Root, Scratch, PluginDir;
+    internal static string Root, DataRoot, Scratch, PluginDir;
     internal static JsonSerializerSettings Json;
     static readonly object OutputLock = new object();
     static StreamWriter Output;
@@ -25,6 +25,8 @@ public static class AnikiPluginHost {
     public static int Run(string json) {
         var values = new System.Web.Script.Serialization.JavaScriptSerializer().DeserializeObject(json) as System.Collections.Generic.Dictionary<string,object>;
         Root = Path.GetFullPath((string)values["root"]);
+        DataRoot = values.ContainsKey("data_root") && !string.IsNullOrEmpty((string)values["data_root"])
+            ? Path.GetFullPath((string)values["data_root"]) : Root;
         var module = Path.GetFullPath((string)values["module"]);
         PluginDir = Path.GetDirectoryName(module);
         Scratch = Path.Combine(Path.GetTempPath(), "aniki-plugin-" + System.Diagnostics.Process.GetCurrentProcess().Id);
@@ -60,7 +62,7 @@ public static class AnikiPluginHost {
         var request=JObject.Parse(json);
         var game=request["game"].ToObject<Game>(JsonSerializer.Create(Json));
         // Constructors may migrate settings. Give them a private copy, never the original.
-        var settings=Path.Combine(Root,"ExtensionsData",game.PluginId.ToString(),"config.json");
+        var settings=Path.Combine(DataRoot,"ExtensionsData",game.PluginId.ToString(),"config.json");
         var destination=Path.Combine(Scratch,"data",game.PluginId.ToString());
         Directory.CreateDirectory(destination);
         if(File.Exists(settings)) File.Copy(settings,Path.Combine(destination,"config.json"));
@@ -156,7 +158,7 @@ class ApiProxy:RealProxy {
                     case "get_ExtensionsDataPath":value=Path.Combine(AnikiPluginHost.Scratch,"data");break;
                     case "get_ConfigurationPath":value=AnikiPluginHost.Scratch;break;
                     case "get_ApplicationPath":value=AnikiPluginHost.Root;break;
-                    case "get_IsPortable":value=true;break;
+                    case "get_IsPortable":value=!File.Exists(Path.Combine(AnikiPluginHost.Root,"unins000.exe"));break;
                     default:throw new NotSupportedException(method.Name);
                 }
             } else if(type==typeof(IPlayniteInfoAPI)) {

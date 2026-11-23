@@ -1,6 +1,6 @@
-param([string]$PlayniteRoot='D:\Playnite',[string]$Destination=(Join-Path (Split-Path $PSScriptRoot) 'cache\live.json'))
+param([string]$PlayniteRoot='D:\Playnite',[string]$Destination=(Join-Path (Split-Path $PSScriptRoot) 'cache\live.json'),[string]$PlayniteDataRoot=$PlayniteRoot)
 $ErrorActionPreference='Stop'
-$target=Join-Path $PlayniteRoot 'Extensions\LumenLiveExport_c4825127-e280-4484-9ae2-30c5a5d7a2fd'
+$target=Join-Path $PlayniteDataRoot 'Extensions\LumenLiveExport_c4825127-e280-4484-9ae2-30c5a5d7a2fd'
 New-Item -ItemType Directory -Path $target -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Aniki.LiveExport.dll') -Destination $target -Force
 $manifest=@'

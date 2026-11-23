@@ -60,17 +60,14 @@ impl Controller {
             require_neutral: false,
         }
     }
-    pub fn start(path: PathBuf) -> Self {
+    pub fn start(base: PathBuf) -> Self {
         let controller = Self::new();
         let sample = controller.sample.clone();
         let stop = controller.stop.clone();
         // Device enumeration can be slow. Keep SDL entirely off the first-frame path.
         std::thread::spawn(move || {
-            let diagnostic = path
-                .parent()
-                .unwrap_or(std::path::Path::new("."))
-                .join("artifacts/controller-backend.log");
-            if let Err(error) = unsafe { sdl_worker(path, sample, stop) } {
+            let diagnostic = base.join("artifacts/controller-backend.log");
+            if let Err(error) = unsafe { sdl_worker(sample, stop) } {
                 let _ = std::fs::write(
                     diagnostic,
                     format!("SDL unavailable; Xbox fallback active: {error:#}"),
@@ -188,59 +185,22 @@ impl Drop for Controller {
     }
 }
 
-// SDL's stable C controller ABI. The DLL is bundled beside the executable.
+// SDL is statically linked into this executable.
 // It supplies native DS4/DualSense HID and standard Xbox mappings; no remapper.
-unsafe fn sdl_worker(
-    path: PathBuf,
-    sample: Arc<Mutex<Sample>>,
-    stop: Arc<AtomicBool>,
-) -> anyhow::Result<()> {
-    use std::ffi::{c_char, c_void};
-    type Pad = *mut c_void;
+unsafe fn sdl_worker(sample: Arc<Mutex<Sample>>, stop: Arc<AtomicBool>) -> anyhow::Result<()> {
+    use sdl2_sys::{SDL_GameControllerAxis::*, SDL_GameControllerButton::*, SDL_bool::SDL_FALSE};
+    use sdl2_sys::{
+        SDL_GameControllerClose as close, SDL_GameControllerEventState as events,
+        SDL_GameControllerGetAttached as attached, SDL_GameControllerGetAxis as axis,
+        SDL_GameControllerGetButton as button, SDL_GameControllerGetType as kind,
+        SDL_GameControllerOpen as open, SDL_GameControllerUpdate as update,
+        SDL_InitSubSystem as init, SDL_IsGameController as is_controller,
+        SDL_JoystickEventState as joystick_events, SDL_JoystickGetDeviceInstanceID as instance,
+        SDL_NumJoysticks as count, SDL_PumpEvents as pump, SDL_QuitSubSystem as quit,
+        SDL_SetHint as hint,
+    };
+    type Pad = *mut sdl2_sys::SDL_GameController;
     unsafe {
-        let dll = libloading::Library::new(path)?;
-        macro_rules! symbol {
-            ($name:literal, $ty:ty) => {
-                *dll.get::<$ty>(concat!($name, "\0").as_bytes())?
-            };
-        }
-        let init = symbol!("SDL_InitSubSystem", unsafe extern "C" fn(u32) -> i32);
-        let quit = symbol!("SDL_QuitSubSystem", unsafe extern "C" fn(u32));
-        let hint = symbol!(
-            "SDL_SetHint",
-            unsafe extern "C" fn(*const c_char, *const c_char) -> i32
-        );
-        let count = symbol!("SDL_NumJoysticks", unsafe extern "C" fn() -> i32);
-        let is_controller = symbol!("SDL_IsGameController", unsafe extern "C" fn(i32) -> i32);
-        let instance = symbol!(
-            "SDL_JoystickGetDeviceInstanceID",
-            unsafe extern "C" fn(i32) -> i32
-        );
-        let open = symbol!("SDL_GameControllerOpen", unsafe extern "C" fn(i32) -> Pad);
-        let close = symbol!("SDL_GameControllerClose", unsafe extern "C" fn(Pad));
-        let attached = symbol!(
-            "SDL_GameControllerGetAttached",
-            unsafe extern "C" fn(Pad) -> i32
-        );
-        let kind = symbol!(
-            "SDL_GameControllerGetType",
-            unsafe extern "C" fn(Pad) -> i32
-        );
-        let button = symbol!(
-            "SDL_GameControllerGetButton",
-            unsafe extern "C" fn(Pad, i32) -> u8
-        );
-        let axis = symbol!(
-            "SDL_GameControllerGetAxis",
-            unsafe extern "C" fn(Pad, i32) -> i16
-        );
-        let update = symbol!("SDL_GameControllerUpdate", unsafe extern "C" fn());
-        let pump = symbol!("SDL_PumpEvents", unsafe extern "C" fn());
-        let events = symbol!(
-            "SDL_GameControllerEventState",
-            unsafe extern "C" fn(i32) -> i32
-        );
-        let joystick_events = symbol!("SDL_JoystickEventState", unsafe extern "C" fn(i32) -> i32);
         hint(
             c"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS".as_ptr(),
             c"1".as_ptr(),
@@ -258,7 +218,7 @@ unsafe fn sdl_worker(
             pump();
             update();
             pads.retain(|(_, p)| {
-                if attached(*p) == 0 {
+                if attached(*p) == SDL_FALSE {
                     close(*p);
                     false
                 } else {
@@ -267,7 +227,7 @@ unsafe fn sdl_worker(
             });
             for index in 0..count() {
                 let id = instance(index);
-                if is_controller(index) != 0 && !pads.iter().any(|(n, _)| *n == id) {
+                if is_controller(index) != SDL_FALSE && !pads.iter().any(|(n, _)| *n == id) {
                     let p = open(index);
                     if !p.is_null() {
                         pads.push((id, p));
@@ -282,30 +242,33 @@ unsafe fn sdl_worker(
             for &(id, p) in &pads {
                 let mut bits = 0u16;
                 for (sdl, xinput) in [
-                    (0, 0x1000),
-                    (1, 0x2000),
-                    (2, 0x4000),
-                    (3, 0x8000),
-                    (4, 0x20),
-                    (6, 0x10),
-                    (7, 0x40),
-                    (8, 0x80),
-                    (9, 0x100),
-                    (10, 0x200),
-                    (11, 1),
-                    (12, 2),
-                    (13, 4),
-                    (14, 8),
+                    (SDL_CONTROLLER_BUTTON_A, 0x1000),
+                    (SDL_CONTROLLER_BUTTON_B, 0x2000),
+                    (SDL_CONTROLLER_BUTTON_X, 0x4000),
+                    (SDL_CONTROLLER_BUTTON_Y, 0x8000),
+                    (SDL_CONTROLLER_BUTTON_BACK, 0x20),
+                    (SDL_CONTROLLER_BUTTON_START, 0x10),
+                    (SDL_CONTROLLER_BUTTON_LEFTSTICK, 0x40),
+                    (SDL_CONTROLLER_BUTTON_RIGHTSTICK, 0x80),
+                    (SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 0x100),
+                    (SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0x200),
+                    (SDL_CONTROLLER_BUTTON_DPAD_UP, 1),
+                    (SDL_CONTROLLER_BUTTON_DPAD_DOWN, 2),
+                    (SDL_CONTROLLER_BUTTON_DPAD_LEFT, 4),
+                    (SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 8),
                 ] {
                     if button(p, sdl) != 0 {
                         bits |= xinput;
                     }
                 }
-                let (x, y) = (axis(p, 0), axis(p, 1));
-                if axis(p, 4) > 4000 {
+                let (x, y) = (
+                    axis(p, SDL_CONTROLLER_AXIS_LEFTX),
+                    axis(p, SDL_CONTROLLER_AXIS_LEFTY),
+                );
+                if axis(p, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 4000 {
                     bits |= 0x400;
                 }
-                if axis(p, 5) > 4000 {
+                if axis(p, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 4000 {
                     bits |= 0x800;
                 }
                 if x > 18000 {
@@ -325,7 +288,7 @@ unsafe fn sdl_worker(
                         ready: true,
                         connected: true,
                         buttons: bits,
-                        kind: if matches!(kind(p), 3 | 4 | 7) {
+                        kind: if matches!(kind(p) as i32, 3 | 4 | 7) {
                             Kind::PlayStation
                         } else {
                             Kind::Xbox
@@ -351,6 +314,50 @@ unsafe fn sdl_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "Initializes SDL; run explicitly with --test-threads=1"]
+    fn static_sdl_virtual_controller_reaches_worker() {
+        use sdl2_sys::*;
+        unsafe {
+            SDL_SetMainReady();
+            assert_eq!(SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER), 0);
+            let index = SDL_JoystickAttachVirtual(
+                SDL_JoystickType::SDL_JOYSTICK_TYPE_GAMECONTROLLER,
+                6,
+                15,
+                0,
+            );
+            assert!(index >= 0);
+            let pad = SDL_JoystickOpen(index);
+            assert!(!pad.is_null());
+            let id = SDL_JoystickInstanceID(pad);
+            let sample = Arc::new(Mutex::new(Sample::default()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (worker_sample, worker_stop) = (sample.clone(), stop.clone());
+            let worker = std::thread::spawn(move || sdl_worker(worker_sample, worker_stop));
+            assert_eq!(SDL_JoystickSetVirtualButton(pad, 0, 1), 0);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let passed = loop {
+                let state = *sample.lock().unwrap();
+                if state.ready && state.device == id && state.buttons & 0x1000 != 0 {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            stop.store(true, Ordering::Relaxed);
+            worker.join().unwrap().unwrap();
+            SDL_JoystickClose(pad);
+            SDL_JoystickDetachVirtual(index);
+            SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+            assert!(
+                passed,
+                "Virtual A button did not reach the production SDL worker"
+            );
+        }
+    }
     #[test]
     fn recovery_button_must_be_released_before_confirming() {
         let mut c = Controller::new();

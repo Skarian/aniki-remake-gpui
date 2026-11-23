@@ -12,11 +12,16 @@ out=root/'artifacts/plugin-worker-tests';out.mkdir(parents=True,exist_ok=True)
 framework=Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319')
 dll=out/'PluginFixture.dll'
 game_dir=out/'game';game_dir.mkdir(exist_ok=True)
+data_dir=out/'separate-user-data'
+settings=data_dir/'ExtensionsData/11111111-1111-1111-1111-111111111111/config.json'
+settings.parent.mkdir(parents=True,exist_ok=True)
+settings.write_text('split-settings-marker')
+(game_dir/'paths.json').write_text(json.dumps(dict(program=str(a.playnite.resolve()))))
 subprocess.run([str(framework/'csc.exe'),'/nologo','/target:library','/out:'+str(dll),
     '/reference:'+str(a.playnite/'Playnite.SDK.dll'),'/reference:'+str(framework/'WPF/PresentationFramework.dll'),
     '/reference:System.Xaml.dll','/reference:'+str(framework/'WPF/WindowsBase.dll'),str(root/'tests/PluginFixture.cs')],check=True)
 def request(mode,module=dll):
-    return dict(root=str(a.playnite),module=str(module),game=dict(
+    return dict(root=str(a.playnite),data_root=str(data_dir) if mode=='paths' else '',module=str(module),game=dict(
         Id='22222222-2222-2222-2222-222222222222',PluginId='11111111-1111-1111-1111-111111111111',
         Name='Fixture',GameId=mode,InstallDirectory=str(game_dir),IsInstalled=True))
 def spawn(mode,module=dll):
@@ -25,7 +30,7 @@ def spawn(mode,module=dll):
     child.stdin.write(json.dumps(request(mode,module))+'\n');child.stdin.flush()
     return child
 results=[]
-for mode,expected in [('normal',['started','stopped']),('serialization',['started','stopped']),('early-stop',['stopped']),
+for mode,expected in [('normal',['started','stopped']),('paths',['started','stopped']),('serialization',['started','stopped']),('early-stop',['stopped']),
     ('automatic',['automatic']),('automatic-directory',['automatic']),('throw',['error']),('unsupported',['error']),('multiple',['error']),('crash',[])]:
     child=spawn(mode)
     try:
@@ -34,6 +39,7 @@ for mode,expected in [('normal',['started','stopped']),('serialization',['starte
         events=[json.loads(x[6:]) for x in lines if x.startswith('ANIKI:')]
         assert [e['event'] for e in events]==expected,(mode,child.returncode,events,child.stderr.read())
         if mode=='normal': assert events[0]['pid']==1234,events
+        if mode=='paths': assert settings.read_text()=='split-settings-marker','Original plugin settings changed'
         if mode=='crash': assert child.returncode==17,child.returncode
         if mode=='automatic': assert events[0]['plan']['kind']=='process',events
         results.append(dict(case=mode,passed=True,events=events))

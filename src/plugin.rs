@@ -11,6 +11,8 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Request {
     pub root: String,
+    #[serde(default)]
+    pub data_root: String,
     pub module: String,
     pub game: serde_json::Value,
 }

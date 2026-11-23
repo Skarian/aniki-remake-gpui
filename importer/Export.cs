@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using LiteDB;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -9,6 +11,18 @@ public static class Export {
  public static readonly string[] Tables={"games","platforms","emulators","genres","companies","sources","features"};
  static string Stamp(string dir) { return string.Join("|",Directory.GetFiles(dir,"*.db").OrderBy(x=>x).Select(x=>{var f=new FileInfo(x);return f.Name+":"+f.Length+":"+f.LastWriteTimeUtc.Ticks;})); }
  public static int Main(string[] args) {
+  // Resolve user-provided Playnite assemblies before JIT touches their types.
+  if(args.Length<2) { Console.Error.WriteLine("Expected Playnite program folder and output path.");return 1; }
+  var program=Path.GetFullPath(args[0]);
+  AppDomain.CurrentDomain.AssemblyResolve+=(s,e)=>{
+   var file=Path.Combine(program,new AssemblyName(e.Name).Name+".dll");
+   return File.Exists(file)?Assembly.LoadFrom(file):null;
+  };
+  try { return Run(args); }
+  catch(Exception ex) { Console.Error.WriteLine(ex.Message);return 1; }
+ }
+ [MethodImpl(MethodImplOptions.NoInlining)]
+ static int Run(string[] args) {
   try {
    string root=Path.GetFullPath(args[0]), library=args.Length>2?Path.GetFullPath(args[2]):Path.Combine(root,"library");
    string before=Stamp(library); var tables=new JObject();
@@ -19,11 +33,11 @@ public static class Export {
     tables[table]=rows;
    }
    if(before!=Stamp(library)) throw new IOException("Library changed during import; retaining previous snapshot.");
-   Write(root,Path.Combine(root,"library"),tables,args[1]);return 0;
+   Write(root,args.Length>3?Path.GetFullPath(args[3]):root,library,tables,args[1]);return 0;
   } catch(Exception ex) { Console.Error.WriteLine(ex.Message);return 1; }
  }
- public static void Write(string root,string library,JObject tables,string output) {
-  var data=new JObject(); data["schema"]=1;data["root"]=root;data["library"]=library;data["exported_utc"]=DateTime.UtcNow.ToString("o");data["collections"]=tables;
+ public static void Write(string root,string dataRoot,string library,JObject tables,string output) {
+  var data=new JObject(); data["schema"]=1;data["root"]=root;data["data_root"]=dataRoot;data["library"]=library;data["exported_utc"]=DateTime.UtcNow.ToString("o");data["collections"]=tables;
   string destination=Path.GetFullPath(output);Directory.CreateDirectory(Path.GetDirectoryName(destination));
   string tmp=destination+"."+Guid.NewGuid().ToString("N")+".tmp";
   File.WriteAllText(tmp,data.ToString(Formatting.None),new System.Text.UTF8Encoding(false));

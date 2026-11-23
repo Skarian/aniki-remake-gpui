@@ -14,6 +14,14 @@ public class FixtureLibrary:LibraryPlugin {
         if(System.Windows.Application.Current!=null) throw new Exception("Unexpected WPF application");
     }
     public override IEnumerable<PlayController> GetPlayActions(GetPlayActionsArgs args) {
+        if(args.Game.GameId=="paths") {
+            var expected=Playnite.SDK.Data.Serialization.FromJsonFile<Dictionary<string,string>>(Path.Combine(args.Game.InstallDirectory,"paths.json"));
+            Require(string.Equals(PlayniteApi.Paths.ApplicationPath,expected["program"],StringComparison.OrdinalIgnoreCase),"Wrong program root: "+PlayniteApi.Paths.ApplicationPath+" expected "+expected["program"]);
+            Require(PlayniteApi.Paths.IsPortable==(!File.Exists(Path.Combine(expected["program"],"unins000.exe"))),"Wrong portable mode");
+            var settings=Path.Combine(PlayniteApi.Paths.ExtensionsDataPath,Id.ToString(),"config.json");
+            Require(File.ReadAllText(settings)=="split-settings-marker","Wrong settings root");
+            File.WriteAllText(settings,"worker-only-change");
+        }
         if(args.Game.GameId=="serialization") CheckSerialization(args.Game.InstallDirectory);
         if(args.Game.GameId=="unsupported") { var ignored=PlayniteApi.Database.Games; }
         if(args.Game.GameId.StartsWith("automatic")) {

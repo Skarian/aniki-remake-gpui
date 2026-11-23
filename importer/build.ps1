@@ -1,12 +1,12 @@
-param([string]$PlayniteRoot='D:\Playnite')
+param([string]$PlayniteRoot='D:\Playnite',[string]$OutputDirectory=$PSScriptRoot)
 $ErrorActionPreference='Stop'
-$out=$PSScriptRoot
+$out=$OutputDirectory
+New-Item -ItemType Directory -Path $out -Force | Out-Null
 $csc='C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-foreach($dll in @('LiteDB.dll','Newtonsoft.Json.dll')){Copy-Item -LiteralPath (Join-Path $PlayniteRoot $dll) -Destination $out -Force}
-& $csc /nologo /target:exe "/out:$out\Aniki.Import.exe" "/reference:$out\LiteDB.dll" "/reference:$out\Newtonsoft.Json.dll" "$out\Export.cs"
+& $csc /nologo /target:exe "/out:$out\Aniki.Import.exe" "/reference:$PlayniteRoot\LiteDB.dll" "/reference:$PlayniteRoot\Newtonsoft.Json.dll" "$PSScriptRoot\Export.cs"
 if($LASTEXITCODE){exit $LASTEXITCODE}
-& $csc /nologo /target:library "/out:$out\Aniki.LiveExport.dll" "/reference:$PlayniteRoot\Playnite.SDK.dll" "/reference:$out\LiteDB.dll" "/reference:$out\Newtonsoft.Json.dll" "$out\Export.cs" "$out\LiveExport.cs"
+& $csc /nologo /target:library "/out:$out\Aniki.LiveExport.dll" "/reference:$PlayniteRoot\Playnite.SDK.dll" "/reference:$PlayniteRoot\LiteDB.dll" "/reference:$PlayniteRoot\Newtonsoft.Json.dll" "$PSScriptRoot\Export.cs" "$PSScriptRoot\LiveExport.cs"
 if($LASTEXITCODE){exit $LASTEXITCODE}
 $framework=Split-Path $csc
-& $csc /nologo /target:library "/out:$out\Aniki.PluginHost.dll" "/reference:$PlayniteRoot\Playnite.SDK.dll" "/reference:$out\Newtonsoft.Json.dll" /reference:System.Web.Extensions.dll /reference:System.Xaml.dll "/reference:$framework\WPF\WindowsBase.dll" "/reference:$framework\WPF\PresentationFramework.dll" "/reference:$framework\WPF\PresentationCore.dll" "$out\PluginHost.cs"
+& $csc /nologo /target:library "/out:$out\Aniki.PluginHost.dll" "/reference:$PlayniteRoot\Playnite.SDK.dll" "/reference:$PlayniteRoot\Newtonsoft.Json.dll" /reference:System.Web.Extensions.dll /reference:System.Xaml.dll "/reference:$framework\WPF\WindowsBase.dll" "/reference:$framework\WPF\PresentationFramework.dll" "/reference:$framework\WPF\PresentationCore.dll" "$PSScriptRoot\PluginHost.cs"
 exit $LASTEXITCODE

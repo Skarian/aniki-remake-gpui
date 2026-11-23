@@ -33,7 +33,7 @@ public sealed class LumenLiveExport : GenericPlugin {
    tables["companies"]=JArray.FromObject(api.Database.Companies.ToList(),serializer);
    tables["sources"]=JArray.FromObject(api.Database.Sources.ToList(),serializer);
    tables["features"]=JArray.FromObject(api.Database.Features.ToList(),serializer);
-   Export.Write(api.Paths.ApplicationPath,api.Database.DatabasePath,tables,Output);
+   Export.Write(api.Paths.ApplicationPath,api.Paths.ConfigurationPath,api.Database.DatabasePath,tables,Output);
   } catch(Exception ex){LogManager.GetLogger().Warn(ex,"Aniki snapshot export failed; previous snapshot retained.");}
   finally{Interlocked.Exchange(ref running,0);}
  }

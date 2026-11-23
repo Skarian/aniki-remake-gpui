@@ -16,13 +16,20 @@ Home has one action: select a game. Details contains Play and Watch video. The m
 | Watch video | Y | Triangle | V |
 | Fullscreen | | | F11 |
 
-## Build and run
+## Use a portable package
 
-Requires Windows x64, Rust with the MSVC toolchain, Visual Studio C++ Build Tools, the Windows SDK, and .NET Framework 4.x. GPUI 0.2.2 is vendored with documented Windows lifecycle patches. Cargo.lock pins the dependency graph.
+Extract the complete folder somewhere writable, edit `aniki-remake-gpui.json`
+with your Playnite paths, then open `aniki-remake-gpui.exe`. Keep the `assets`,
+`importer`, and `tools` folders beside it. Playnite and its storefront integrations
+must already be installed and configured. No SDL, FFmpeg, Rust or compiler install
+is needed by the end user. Playnite can stay closed while using the launcher.
 
-1. Copy `aniki-remake-gpui.example.json` to `aniki-remake-gpui.json`. Set `playnite_root` to your Playnite installation/data directory and `ffmpeg` to your FFmpeg executable if you want trailers.
-2. Place the **x64 SDL2.dll** runtime beside the executable. The tested version is SDL 2.30.5. Playnite may ship a 32-bit DLL, which cannot be used here. See [SDL releases](https://github.com/libsdl-org/SDL/releases) and the bundled third-party notices.
-3. Build the read-only importer, managed plugin adapter and launcher:
+## Build and run (developers)
+
+Requires Windows x64, Rust with the MSVC toolchain, Visual Studio C++ Build Tools (including CMake), the Windows SDK, and .NET Framework 4.x. GPUI 0.2.2 is vendored with documented Windows lifecycle patches. Cargo.lock pins the dependency graph.
+
+1. Copy `aniki-remake-gpui.example.json` to `aniki-remake-gpui.json`. Set the Playnite paths described below. An empty `ffmpeg` uses the package's `tools/ffmpeg/bin/ffmpeg.exe`; a custom executable path is optional.
+2. Build the read-only importer, managed plugin adapter and launcher:
 
 ```powershell
 .\importer\build.ps1 -PlayniteRoot 'D:\Playnite'
@@ -32,9 +39,28 @@ Requires Windows x64, Rust with the MSVC toolchain, Visual Studio C++ Build Tool
 .\aniki-remake-gpui.exe
 ```
 
-`build.ps1` uses a project-local toolchain under `.tools` when present, otherwise your installed Cargo. The importer uses the LiteDB and Newtonsoft.Json assemblies from your Playnite installation. No game media, personal library snapshots, configuration, or toolchains are included in this repository.
+`build.ps1` uses a project-local toolchain under `.tools` when present, otherwise your installed Cargo. SDL 2.32.10 and the Microsoft C runtime are statically linked: no `SDL2.dll` or separate VC runtime install is needed for the native launcher. The portable package includes FFmpeg/ffprobe as private tools; users do not install them or add them to PATH. The importer and plugin host load user-provided LiteDB, Newtonsoft.Json, SDK and storefront assemblies from the configured Playnite installation; we do not bundle them. Our own `Aniki.Import.exe` and `Aniki.PluginHost.dll` still accompany the launcher. No game media, personal library snapshots, configuration, or toolchains are included in this repository.
 
-Optionally run `importer/install-live-export.ps1 -PlayniteRoot 'D:\Playnite'`, then restart Playnite. It exports metadata into this project's `cache/live.json`. Re-run after moving the project. Neither importer nor exporter edits Playnite's library. A background refresh preserves the last valid snapshot if the database is locked or an export fails.
+For maintainers, `package.ps1 -Portable -FFmpegRoot <static-ffmpeg-build-folder> -OutputDirectory <new-folder>` assembles that portable folder from a build containing `bin/ffmpeg.exe`, `bin/ffprobe.exe` and `LICENSE.txt`. `-ImporterRoot` can select staged helper builds. The package contains only allowlisted helper files and a clean example configuration, never the developer's Playnite DLLs, settings or cache. Retain the matching FFmpeg source/build materials for any public binary release; GitHub download/build automation is not included yet. End users only edit their Playnite JSON paths and run the app.
+
+### Playnite folders
+
+Use absolute paths in JSON. `playnite_root` is the **program folder**, containing `Playnite.DesktopApp.exe` and `Playnite.SDK.dll`. `playnite_data_root` is the **user-data folder**, containing `config.json`, `ExtensionsData`, and extra media. An empty data root uses the program folder, preserving existing portable configurations. `playnite_library_path` is the database folder containing `games.db` and `files`; leave it empty to use `<data root>/library`.
+
+For example, a separate installation/data layout can use:
+
+```json
+{
+  "playnite_root": "C:\\Apps\\Playnite",
+  "playnite_data_root": "C:\\Users\\YourName\\AppData\\Roaming\\Playnite",
+  "playnite_library_path": "",
+  "ffmpeg": ""
+}
+```
+
+Replace the example paths with your own. If you relocated Playnite's library, set `playnite_library_path` to that folder. Storefront plugins are searched in the data folder first, then the program folder, matching Playnite's precedence. `{PlayniteDir}` in game/emulator actions continues to mean the program folder. These fields are manual configuration; environment-variable placeholders are not expanded.
+
+Optionally run `importer/install-live-export.ps1 -PlayniteRoot 'D:\Playnite'`, then restart Playnite. For separate folders, also pass `-PlayniteDataRoot <data-folder>`. It exports metadata into this project's `cache/live.json`. Re-run after moving the project or updating the exporter. Neither importer nor exporter edits Playnite's library. A background refresh preserves the last valid snapshot if the database is locked or an export fails.
 
 ## Apollo
 
@@ -69,6 +95,8 @@ Music and trailer audio use FFmpeg and a bounded SDL stereo queue. Music loops, 
 The [2026-11-10 QA report](docs/qa-2026-11-10.md) records the tested builds, the corrected startup-focus regression, and remaining release gates. The plugin-host candidate is validated separately in [plugin hosting](docs/plugin-host.md).
 
 - `build.ps1 -Test`: Rust tests for launch resolution, process tracking, input, cache ownership, and motion.
+- `python tests/library_layout.py --importer <Aniki.Import.exe>`: separate data/custom library import, portable compatibility and read-only database checks, using DLLs from the installed Playnite program folder.
+- `cargo test --bin aniki-remake-gpui static_sdl_ -- --ignored --test-threads=1`: in-process virtual controller and silent dummy-audio checks; set `ANIKI_TEST_FFMPEG` to FFmpeg first. No desktop input or real game is used.
 - `python tests/retained_lifecycle.py --exe <built-exe> --expected-sha256 <recorded-hash>`: real-window tests proving the launcher PID and HWND survive two game cycles each with Xbox and virtual DualShock 4 input; also covers lingering processes, explicit restore, duplicate invocation, missing executables, owner crashes, and normal exit. Builds its own WinForms fixture and needs no game library.
 - Add `--artwork-from-cache` to exercise that lifecycle with real local background, logo, and cover images from the existing cache. The test reads those files without changing the library.
 - The explicitly selected `--modes xbox:pending` case launches the local DAVE THE DIVER Steam entry to test cancellation; it is excluded from the default fixture suite and requires a normal game close afterward.

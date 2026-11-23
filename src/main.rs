@@ -183,7 +183,7 @@ impl Launcher {
             }
         })
         .detach();
-        let controller = Controller::start(base.join("SDL2.dll"));
+        let controller = Controller::start(base.clone());
         let args: Vec<String> = std::env::args().collect();
         let preview = args
             .iter()
@@ -191,7 +191,7 @@ impl Launcher {
             .and_then(|i| args.get(i + 1))
             .cloned()
             .unwrap_or_default();
-        let music = media::Music::new(base.join("SDL2.dll"), config.ffmpeg.clone());
+        let music = media::Music::new(config.ffmpeg_path(&base));
         let mut launcher = Self {
             base,
             config,
@@ -661,7 +661,7 @@ impl Launcher {
         let width: f32 = viewport.width.into();
         let height: f32 = viewport.height.into();
         self.video = media::Video::watch(
-            &self.config.ffmpeg,
+            &self.config.ffmpeg_path(&self.base),
             &game.video,
             (width * window.scale_factor()) as u32,
             (height * window.scale_factor()) as u32,
@@ -670,8 +670,7 @@ impl Launcher {
         if self.video.is_some() {
             self.watching_video = true;
             self.trailer_audio = media::TrailerAudio::start(
-                &self.base.join("SDL2.dll"),
-                &self.config.ffmpeg,
+                &self.config.ffmpeg_path(&self.base),
                 &game.video,
             );
             log(&self.base, "trailer_opened", &game.name, self.start);
@@ -1115,7 +1114,7 @@ impl Launcher {
                         let width: f32 = viewport.width.into();
                         let height: f32 = viewport.height.into();
                         self.video = media::Video::start(
-                            &self.config.ffmpeg,
+                            &self.config.ffmpeg_path(&self.base),
                             &game.video,
                             (width * window.scale_factor()) as u32,
                             (height * window.scale_factor()) as u32,
@@ -1918,6 +1917,8 @@ fn main() {
     if std::env::args().any(|arg| arg == "--plugin-worker") {
         std::process::exit(plugin::worker_main());
     }
+    // We use Rust's entry point, not SDL_main. Initialize before audio/pad threads.
+    unsafe { sdl2_sys::SDL_SetMainReady(); }
     // GUI-subsystem builds have no stderr console. Keep failures diagnosable.
     std::panic::set_hook(Box::new(|info| {
         let base = base_dir();
