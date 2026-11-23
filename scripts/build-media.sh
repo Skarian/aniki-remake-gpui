@@ -32,6 +32,8 @@ meson setup dav1d-build "dav1d-$dav1d" --cross-file cross.ini --prefix "$out/pre
 ninja -C dav1d-build install
 export PKG_CONFIG_LIBDIR="$out/prefix/lib/pkgconfig"
 cd "FFmpeg-$ffmpeg"
+# A tarball inside our checkout must not inherit the launcher's Git version.
+printf 'git-%s\n' "$ffmpeg" > FF_VERSION
 ./configure --target-os=mingw32 --arch=x86_64 --enable-cross-compile \
     --cross-prefix=x86_64-w64-mingw32- --cc=x86_64-w64-mingw32-gcc-posix \
     --cxx=x86_64-w64-mingw32-g++-posix --pkg-config=pkg-config --pkg-config-flags=--static \
@@ -42,7 +44,7 @@ x86_64-w64-mingw32-strip ffmpeg.exe ffprobe.exe
 cp ffmpeg.exe ffprobe.exe "$out/ffmpeg/bin/"
 cp COPYING.LGPLv2.1 "$out/ffmpeg/LICENSE.txt"
 cp "$out/dav1d-$dav1d/COPYING" "$out/ffmpeg/LICENSE-dav1d.txt"
-cp ffbuild/config.log config.h "$out/sources/"
+cp ffbuild/config.log config.h FF_VERSION "$out/sources/"
 cp "$root/scripts/build-media.sh" "$out/sources/"
 cp "$out/cross.ini" "$out/sources/"
 dpkg-query -W > "$out/sources/build-packages.txt"

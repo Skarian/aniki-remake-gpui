@@ -10,6 +10,11 @@ $config = Get-Content "$Package/aniki-remake-gpui.json" -Raw | ConvertFrom-Json
 if ($config.ffmpeg -ne '' -or (Test-Path "$Package/cache")) { throw 'Package contains local state' }
 $ffmpeg = "$Package/tools/ffmpeg/bin/ffmpeg.exe"
 $probe = "$Package/tools/ffmpeg/bin/ffprobe.exe"
+if (Test-Path "$Package/tools/ffmpeg/SOURCES.txt") {
+    $revision = ((Get-Content "$Package/tools/ffmpeg/SOURCES.txt")[0] -split ' ')[1]
+    $version = (& $ffmpeg -version)[0]
+    if ($LASTEXITCODE -or $version -notlike "*$revision*") { throw 'FFmpeg source/version stamp mismatch' }
+}
 $scratch = Join-Path $env:TEMP ([Guid]::NewGuid().ToString())
 New-Item -ItemType Directory $scratch | Out-Null
 # Exercise the same scaling, frame-rate, BGRA and stereo PCM outputs as the app.
