@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ubuntu 24.04: gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 nasm meson ninja-build pkg-config
+# Ubuntu 24.04: gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix nasm meson ninja-build pkg-config
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$root/artifacts/media-build"
