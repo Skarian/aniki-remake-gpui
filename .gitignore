@@ -16,6 +16,7 @@ artifacts/
 importer/*.exe
 importer/*.dll
 dist/
+tools/ffmpeg/
 aniki-remake-gpui.exe
 aniki-remake-gpui.json
 benchmarks/

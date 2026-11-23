@@ -1,0 +1,121 @@
+name: Windows build and release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Select-String '^version = "([^"]+)"' Cargo.toml | Select-Object -First 1).Matches.Groups[1].Value
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag does not match Cargo.toml' }
+      - name: Build managed helpers with pinned Playnite references
+        run: ./scripts/prepare-playnite.ps1
+      - name: Rust tests
+        run: ./build.ps1 -Test
+      - name: Release build
+        run: ./build.ps1 -Release
+      - name: Test split-library import
+        run: python tests/library_layout.py --importer importer/Aniki.Import.exe --playnite .tools/playnite --launcher target/release/aniki-remake-gpui.exe
+      - name: Test plugin host contract
+        run: |
+          New-Item -ItemType Directory target/release/importer -Force | Out-Null
+          Copy-Item importer/Aniki.PluginHost.dll target/release/importer/
+          python tests/plugin_worker.py --exe target/release/aniki-remake-gpui.exe --playnite .tools/playnite
+      - name: Collect dependency notices
+        run: ./scripts/collect-licenses.ps1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app
+          path: |
+            target/release/aniki-remake-gpui.exe
+            importer/Aniki.Import.exe
+            importer/Aniki.PluginHost.dll
+            artifacts/licenses/
+          if-no-files-found: error
+
+  media:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 nasm meson ninja-build pkg-config
+      - name: Build media tools and matching sources
+        run: bash scripts/build-media.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: media
+          path: |
+            artifacts/media-build/ffmpeg/
+            artifacts/media-build/media-sources.tar.gz
+          if-no-files-found: error
+
+  package:
+    needs: [app, media]
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: app
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: media
+          path: artifacts/media-build
+      - name: Package and verify
+        shell: pwsh
+        run: |
+          $version = (Select-String '^version = "([^"]+)"' Cargo.toml | Select-Object -First 1).Matches.Groups[1].Value
+          ./package.ps1 -Portable -FFmpegRoot artifacts/media-build/ffmpeg
+          ./scripts/check-package.ps1 -Package dist/aniki-remake-gpui
+          Compress-Archive -Path dist/aniki-remake-gpui -DestinationPath "dist/aniki-remake-gpui-v$version-windows-x64.zip"
+          Copy-Item artifacts/media-build/media-sources.tar.gz "dist/aniki-remake-gpui-v$version-media-sources.tar.gz"
+          Get-ChildItem dist -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName).Hash.ToLowerInvariant(), $_.Name } | Set-Content dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+      - name: Create draft for final package review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --verify-tag --draft --title "$GITHUB_REF_NAME" --notes-file docs/release-notes.md

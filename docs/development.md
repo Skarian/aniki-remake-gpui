@@ -1,0 +1,120 @@
+﻿# Development and behavior notes
+
+A minimal Windows fullscreen launcher built with Rust and GPUI. It reads a Playnite library and its existing artwork, logos, trailers, music, and platform images. Playnite does not have to remain open.
+
+Home has one action: select a game. Details contains Play and Watch video. The menu is on Home only. Xbox, native DualShock 4 / DualSense, keyboard, and mouse input are supported. Physical DualSense USB/Bluetooth still needs hardware verification.
+
+## Controls
+
+| Action | Xbox | PlayStation | Keyboard |
+| --- | --- | --- | --- |
+| Browse / choose action | D-pad / left stick | D-pad / left stick | Arrow keys |
+| Change collection | LB / RB | L1 / R1 | Q / E |
+| Select / confirm | A | Cross | Enter |
+| Back / Home menu | B / Start | Circle / Options | Escape / F1 |
+| Music | X | Square | M |
+| Watch video | Y | Triangle | V |
+| Fullscreen | | | F11 |
+
+## Use a portable package
+
+Extract the complete folder somewhere writable, edit `aniki-remake-gpui.json`
+with your Playnite paths, then open `aniki-remake-gpui.exe`. Keep the `assets`,
+`importer`, and `tools` folders beside it. Playnite and its storefront integrations
+must already be installed and configured. No SDL, FFmpeg, Rust or compiler install
+is needed by the end user. Playnite can stay closed while using the launcher.
+
+## Build and run (developers)
+
+Requires Windows x64, Rust with the MSVC toolchain, Visual Studio C++ Build Tools (including CMake), the Windows SDK, and .NET Framework 4.x. GPUI 0.2.2 is vendored with documented Windows lifecycle patches. Cargo.lock pins the dependency graph.
+
+1. Copy `aniki-remake-gpui.example.json` to `aniki-remake-gpui.json`. Set the Playnite paths described below. An empty `ffmpeg` uses the package's `tools/ffmpeg/bin/ffmpeg.exe`; a custom executable path is optional.
+2. Build the read-only importer, managed plugin adapter and launcher:
+
+```powershell
+.\importer\build.ps1 -PlayniteRoot 'D:\Playnite'
+.\build.ps1 -Test
+.\build.ps1 -Release
+.\package.ps1
+.\aniki-remake-gpui.exe
+```
+
+`build.ps1` uses a project-local toolchain under `.tools` when present, otherwise your installed Cargo. SDL 2.32.10 and the Microsoft C runtime are statically linked: no `SDL2.dll` or separate VC runtime install is needed for the native launcher. The portable package includes FFmpeg/ffprobe as private tools; users do not install them or add them to PATH. The importer and plugin host load user-provided LiteDB, Newtonsoft.Json, SDK and storefront assemblies from the configured Playnite installation; we do not bundle them. Our own `Aniki.Import.exe` and `Aniki.PluginHost.dll` still accompany the launcher. No game media, personal library snapshots, configuration, or toolchains are included in this repository.
+
+For maintainers, `package.ps1 -Portable -FFmpegRoot <static-ffmpeg-build-folder> -OutputDirectory <new-folder>` assembles that portable folder from a build containing `bin/ffmpeg.exe`, `bin/ffprobe.exe` and `LICENSE.txt`. `-ImporterRoot` can select staged helper builds. The package contains only allowlisted helper files and a clean example configuration, never the developer's Playnite DLLs, settings or cache. The GitHub release workflow builds the media tools from pinned source and publishes matching source archives; see [releases](releases.md). End users only edit their Playnite JSON paths and run the app.
+
+### Playnite folders
+
+Use absolute paths in JSON. `playnite_root` is the **program folder**, containing `Playnite.DesktopApp.exe` and `Playnite.SDK.dll`. `playnite_data_root` is the **user-data folder**, containing `config.json`, `ExtensionsData`, and extra media. An empty data root uses the program folder, preserving existing portable configurations. `playnite_library_path` is the database folder containing `games.db` and `files`; leave it empty to use `<data root>/library`.
+
+For example, a separate installation/data layout can use:
+
+```json
+{
+  "playnite_root": "C:\\Apps\\Playnite",
+  "playnite_data_root": "C:\\Users\\YourName\\AppData\\Roaming\\Playnite",
+  "playnite_library_path": "",
+  "ffmpeg": ""
+}
+```
+
+Replace the example paths with your own. If you relocated Playnite's library, set `playnite_library_path` to that folder. Storefront plugins are searched in the data folder first, then the program folder, matching Playnite's precedence. `{PlayniteDir}` in game/emulator actions continues to mean the program folder. These fields are manual configuration; environment-variable placeholders are not expanded.
+
+Optionally run `importer/install-live-export.ps1 -PlayniteRoot 'D:\Playnite'`, then restart Playnite. For separate folders, also pass `-PlayniteDataRoot <data-folder>`. It exports metadata into this project's `cache/live.json`. Re-run after moving the project or updating the exporter. Neither importer nor exporter edits Playnite's library. A background refresh preserves the last valid snapshot if the database is locked or an export fails.
+
+## Apollo
+
+Set Apollo's command to the full path of `aniki-remake-gpui.exe` and its working directory to the containing folder. The cover is [assets/apollo/aniki-remake-gpui-cover.png](../assets/apollo/aniki-remake-gpui-cover.png). Apollo is optional; the same executable works standalone.
+
+Fullscreen startup and explicit reactivation use the current Windows primary display. If Apollo creates a new primary virtual display while the launcher is already open, launching it again moves and resizes that same window to the new display. Windowed reactivation and automatic game return keep their existing placement. Configure Apollo's streaming display as primary when using multiple displays.
+
+## Game lifecycle
+
+The launcher keeps one fullscreen GPUI window visible. It presents the game's still background, logo, and orbit animation before dispatching launch. It holds that cover until a visible, responsive game window has remained stable for 1.5 seconds, then releases topmost status and hands over focus. That status screen remains underneath throughout gameplay. Music and video stop; only the game's background, logo, and Details cover remain cached. The animation pauses while the launcher is inactive. Back cancels an attempt before Started is observed, or dismisses the cover and disables automatic return after Started. Cancellation never kills a game; a late-starting game can run untracked. The 90-second readiness limit uncovers the desktop without abandoning process tracking; a late ready window can still receive focus.
+
+When the tracked process tree exits, the **same window** returns to that game's Details page, collection, and scroll position. B returns Home. Held controller/keyboard input must be released first. If you deliberately browsed elsewhere during gameplay, your navigation is preserved. Automatic sessions deliberately bring the game forward and reclaim focus on return, including over another app. Back opts out. Completion runs independently of rendering, with a nonblocking one-second return delay; process polling can add up to two seconds. Ordinary browsing and return clear topmost; only the launch cover uses it. There is no black-cover window, minimization, replacement frontend, or return fade from black. A second invocation activates the existing window rather than creating a competing fullscreen interface.
+
+An emulator that has closed its window but still has a live process is still running, as in Playnite. Opening the launcher again restores its existing window; Back returns from the running-game screen to the library without killing the game or discarding tracking. Starting another game is blocked until that tracked session finishes.
+
+See [Playnite alignment](playnite-alignment.md) for the source comparison and intentional differences.
+
+## Compatibility and limits
+
+Steam now uses the actual installed Playnite Steam library DLL. An on-demand worker runs inside a second instance of this executable, hosts .NET Framework, and loads one library plugin. Playnite itself stays closed. The worker exits after an automatic action is resolved, or remains until a custom controller reports Stopped. No CLR or plugin is loaded into the GPUI process. See [plugin hosting](plugin-host.md) for scope and verification.
+
+The initial provider list is Steam, Epic, GOG, Xbox, Ubisoft and Battle.net. Install their integrations through Playnite first. Steam has a real-game launch/return check; GOG has an actual-DLL automatic-action check. The other providers are experimental, not certified storefront compatibility. Emulator and explicit executable actions retain native process-tree tracking. Old cached Steam plans retain their native fallback until the library refreshes.
+
+The adapter supports a narrow SDK surface. Login/import dialogs, scripts, multi-action / multi-ROM selection, advanced custom tracking, library editing, achievements, downloads, and playtime writeback are not implemented. Unsupported SDK calls/actions produce an error. Plugin settings are copied for each worker and changes are discarded. An emulator left running after its window closes may need to finish exiting or be closed before another instance can start; the launcher does not force-kill it.
+
+Trailers preserve the source frame rate up to 60 fps and decode up to 4K, bounded by the source resolution and the display's physical pixel size. Keep `ffprobe.exe` beside the configured `ffmpeg.exe` for source-size detection; without it, decoding falls back to a 1080p size limit. The default is two decoder/filter/output threads; `video_threads: 0` enables FFmpeg auto sizing. Artwork uses a bounded cache, and media stops on focus loss or game launch. Exact long-duration trailer audio/video synchronization has not been measured.
+
+Music and trailer audio use FFmpeg and a bounded SDL stereo queue. Music loops, and switching selections closes the previous output before starting another. `music_volume` is linear gain from 0 to 1 (default 0.5); existing normalized Playnite tracks are read without rewriting them. Quiet introductions retain their source dynamics. No microphone is used by the optional `tests/audio_probe.py` speaker-loopback loudness test.
+
+## Verification
+
+The [2026-11-10 QA report](qa-2026-11-10.md) records the tested builds, the corrected startup-focus regression, and remaining release gates. The plugin-host candidate is validated separately in [plugin hosting](plugin-host.md).
+
+- `build.ps1 -Test`: Rust tests for launch resolution, process tracking, input, cache ownership, and motion.
+- `python tests/library_layout.py --importer <Aniki.Import.exe>`: separate data/custom library import, portable compatibility and read-only database checks, using DLLs from the installed Playnite program folder.
+- `cargo test --bin aniki-remake-gpui static_sdl_ -- --ignored --test-threads=1`: in-process virtual controller and silent dummy-audio checks; set `ANIKI_TEST_FFMPEG` to FFmpeg first. No desktop input or real game is used.
+- `python tests/retained_lifecycle.py --exe <built-exe> --expected-sha256 <recorded-hash>`: real-window tests proving the launcher PID and HWND survive two game cycles each with Xbox and virtual DualShock 4 input; also covers lingering processes, explicit restore, duplicate invocation, missing executables, owner crashes, and normal exit. Builds its own WinForms fixture and needs no game library.
+- Add `--artwork-from-cache` to exercise that lifecycle with real local background, logo, and cover images from the existing cache. The test reads those files without changing the library.
+- The explicitly selected `--modes xbox:pending` case launches the local DAVE THE DIVER Steam entry to test cancellation; it is excluded from the default fixture suite and requires a normal game close afterward.
+- `tests/selection_flow.py`: full preview navigation, Details actions, menu restrictions, and video with virtual Xbox / DualShock 4 controllers. See the script's startup instructions.
+
+Controller integration tests require Python's `vgamepad` package and an existing ViGEm driver. They do not install drivers. Tests create isolated copies under `artifacts`; do not run interactive tests while using another controller application.
+
+`--trace-motion` and `--trace-memory` write local diagnostics under `artifacts`. Render callbacks are not physical display scanout or Apollo delivery.
+
+Rust panics in GUI builds are recorded in `artifacts/panic.log` with their source location and a backtrace, even when no terminal is attached.
+
+For visual inspection without launching games, use `--preview-screen home|details|menu|launching|running|error|empty|empty-library|loading` with optional `--preview-input keyboard|xbox|playstation`. Preview mode does not edit configuration or refresh the library.
+
+## Attribution
+
+Inspired by Aniki's minimal fullscreen presentation. Game media belongs to its respective owners and is read from the user's library.
+
+Launch-variable behavior and tests were adapted from [Playnite](https://github.com/JosefNemec/Playnite), reference commit `e2e6efcda311fea38fcd92f61c8ca90811d97f28`, particularly `GameExtensions.cs`, `GameTests.cs`, and `GenericGameController.cs`. The complete upstream test suite has not been ported.
+
+Input glyphs are [Meritite Union input-prompts](https://github.com/meritite-union/input-prompts), CC0; editable sources and provenance are in `assets/prompts`. GPUI is Apache-2.0 with changes recorded in `vendor/GPUI-PATCH.txt`. SDL is zlib licensed. See [THIRD_PARTY_NOTICES.txt](../THIRD_PARTY_NOTICES.txt).
+

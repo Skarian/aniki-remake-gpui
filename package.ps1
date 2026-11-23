@@ -22,6 +22,9 @@ if($Portable){
  foreach($file in @('Aniki.Import.exe','Aniki.PluginHost.dll')){Copy-Item -LiteralPath (Join-Path $ImporterRoot $file) -Destination $helpers}
  foreach($file in @('ffmpeg.exe','ffprobe.exe')){Copy-Item -LiteralPath (Join-Path $FFmpegRoot "bin\$file") -Destination (Join-Path $media 'bin')}
  Copy-Item -LiteralPath (Join-Path $FFmpegRoot 'LICENSE.txt') -Destination $media
+ foreach($file in @('LICENSE-dav1d.txt','SOURCES.txt')){
+  if(Test-Path -LiteralPath (Join-Path $FFmpegRoot $file)){Copy-Item -LiteralPath (Join-Path $FFmpegRoot $file) -Destination $media}
+ }
  & (Join-Path $media 'bin\ffmpeg.exe') -version | Set-Content -LiteralPath (Join-Path $media 'build-info.txt')
  if($LASTEXITCODE -ne 0){throw 'Packaged FFmpeg did not run'}
  & (Join-Path $media 'bin\ffprobe.exe') -version | Out-Null
@@ -29,6 +32,10 @@ if($Portable){
  Copy-Item -LiteralPath (Join-Path $root 'target\release\aniki-remake-gpui.exe') -Destination $OutputDirectory
  Copy-Item -LiteralPath (Join-Path $root 'aniki-remake-gpui.example.json') -Destination (Join-Path $OutputDirectory 'aniki-remake-gpui.json')
  foreach($file in @('README.md','THIRD_PARTY_NOTICES.txt')){Copy-Item -LiteralPath (Join-Path $root $file) -Destination $OutputDirectory}
+ Copy-Item -LiteralPath (Join-Path $root 'docs') -Destination $OutputDirectory -Recurse
+ Copy-Item -LiteralPath (Join-Path $root 'aniki-remake-gpui.example.json') -Destination $OutputDirectory
+ $licenses=Join-Path $root 'artifacts\licenses'
+ if(Test-Path -LiteralPath $licenses){Copy-Item -LiteralPath $licenses -Destination $OutputDirectory -Recurse}
  $packedPrompts=Join-Path $OutputDirectory 'assets\prompts'
  $packedApollo=Join-Path $OutputDirectory 'assets\apollo'
  New-Item -ItemType Directory -Path $packedPrompts,$packedApollo | Out-Null
