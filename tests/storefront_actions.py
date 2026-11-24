@@ -99,7 +99,7 @@ if a.probe:
     (runner/'importer').mkdir(parents=True)
     (game/'bin').mkdir()
     shutil.copy2(a.probe, runner/'launch_probe.exe')
-    shutil.copy2(a.exe.parent/'importer/Aniki.PluginHost.dll', runner/'importer/Aniki.PluginHost.dll')
+    shutil.copy2(a.exe.parent/'importer/PlayniteFullscreen.PluginHost.dll', runner/'importer/PlayniteFullscreen.PluginHost.dll')
     subprocess.run(['C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe', '/nologo', '/target:winexe',
                     '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll',
                     '/out:'+str(game/'bin/WindowFixture.exe'), str(root/'tests/WindowFixture.cs')], check=True)
@@ -122,7 +122,7 @@ assert not plan['url'] and plan['kind'] == 'directory' and plan['install_dir'] =
 assert '/gameId=999999999999999' in plan['arguments'] and str(game) in plan['arguments'], plan
 assert hashlib.sha256(settings.read_bytes()).hexdigest() == settings_hash, 'Plugin changed original settings'
 report = dict(exe_sha256=hashlib.sha256(a.exe.read_bytes()).hexdigest(),
-              adapter_sha256=hashlib.sha256((a.exe.parent/'importer/Aniki.PluginHost.dll').read_bytes()).hexdigest(),
+              adapter_sha256=hashlib.sha256((a.exe.parent/'importer/PlayniteFullscreen.PluginHost.dll').read_bytes()).hexdigest(),
               plugins={str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in (epic, gog)},
               scratch=str(scratch), cases=results)
 write(out/'results.json', report)

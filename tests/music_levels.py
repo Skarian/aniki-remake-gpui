@@ -2,7 +2,7 @@
 import concurrent.futures, json, subprocess
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
-config=json.loads((root/'aniki-remake-gpui.json').read_text(encoding='utf-8-sig'))
+config=json.loads((root/'playnite-fullscreen-gpui.json').read_text(encoding='utf-8-sig'))
 games=json.loads((root/'cache/library.json').read_text(encoding='utf-8-sig'))['games']
 def measure(game):
     result=subprocess.run([config['ffmpeg'],'-hide_banner','-i',game['music'],'-t','30','-af','loudnorm=I=-18:TP=-1:LRA=11:print_format=json','-f','null','-'],capture_output=True,text=True,encoding='utf-8',errors='replace')

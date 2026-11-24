@@ -10,7 +10,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 out = root / 'artifacts/memory-optimization/decoder-regression.json'
-config = json.loads((root / 'aniki-remake-gpui.json').read_text(encoding='utf-8-sig'))
+config = json.loads((root / 'playnite-fullscreen-gpui.json').read_text(encoding='utf-8-sig'))
 library = json.loads((root / 'cache/library.json').read_text(encoding='utf-8-sig'))
 results = []
 

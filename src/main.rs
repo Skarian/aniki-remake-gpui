@@ -698,7 +698,7 @@ impl Launcher {
             return;
         }
         if let Ok(bytes) = serde_json::to_vec_pretty(&self.config) {
-            let _ = library::atomic_write(&self.base.join("aniki-remake-gpui.json"), &bytes);
+            let _ = library::atomic_write(&self.base.join("playnite-fullscreen-gpui.json"), &bytes);
         }
     }
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1904,7 +1904,7 @@ fn base_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
     let mut path = exe.parent().unwrap().to_path_buf();
     for _ in 0..4 {
-        if path.join("aniki-remake-gpui.json").exists() {
+        if Config::path(&path).exists() {
             return path;
         }
         if !path.pop() {
@@ -1967,7 +1967,7 @@ fn main() {
     unsafe {
         std::env::set_var("ANIKI_DISABLE_WINDOW_ANIMATIONS", "1");
     }
-    let config: Config = fs::read(base.join("aniki-remake-gpui.json"))
+    let config: Config = fs::read(Config::path(&base))
         .ok()
         .and_then(|b| match Config::parse(&b) {
             Ok(config) => Some(config),
@@ -2038,9 +2038,9 @@ fn main() {
                 }),
                 titlebar: Some(TitlebarOptions {
                     title: Some(if fixture {
-                        "aniki-remake-gpui test game".into()
+                        "playnite-fullscreen-gpui test game".into()
                     } else {
-                        "aniki-remake-gpui".into()
+                        "playnite-fullscreen-gpui".into()
                     }),
                     ..Default::default()
                 }),
@@ -2064,7 +2064,7 @@ fn main() {
                 })
             },
         )
-        .expect("Create aniki-remake-gpui window");
+        .expect("Create playnite-fullscreen-gpui window");
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

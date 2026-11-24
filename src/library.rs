@@ -90,6 +90,11 @@ impl Default for Config {
     }
 }
 impl Config {
+    pub fn path(base: &Path) -> PathBuf {
+        let current = base.join("playnite-fullscreen-gpui.json");
+        let previous = base.join("aniki-remake-gpui.json");
+        if current.exists() || !previous.exists() { current } else { previous }
+    }
     pub fn ffmpeg_path(&self, base: &Path) -> String {
         if self.ffmpeg.is_empty() {
             base.join("tools/ffmpeg/bin/ffmpeg.exe")
@@ -238,7 +243,7 @@ pub fn launch_plan(
     let install = ex(&text(&g["InstallDirectory"]));
     if has_scripts(g) {
         bail!(
-            "This game has Playnite scripts. Script execution is not yet supported by aniki-remake-gpui."
+            "This game has Playnite scripts. Script execution is not yet supported by playnite-fullscreen-gpui."
         )
     }
     let provider = text(&g["PluginId"]);
@@ -802,7 +807,7 @@ pub fn start_refresh(base: PathBuf, config: Config, tx: Sender<Update>, paused: 
                 if retry > 0 {
                     retry -= 1;
                 } else {
-                    let result = Command::new(base.join("importer/Aniki.Import.exe"))
+                    let result = Command::new(base.join("importer/PlayniteFullscreen.Import.exe"))
                         .arg(&config.playnite_root)
                         .arg(&raw)
                         .arg(&library)
@@ -866,6 +871,22 @@ pub fn start_refresh(base: PathBuf, config: Config, tx: Sender<Update>, paused: 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn renamed_config_prefers_current_name_and_reads_previous_name() {
+        let base = std::env::temp_dir().join(format!("gpui-config-rename-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let current = base.join("playnite-fullscreen-gpui.json");
+        let previous = base.join("aniki-remake-gpui.json");
+        fs::write(&previous, br#"{"music_volume":0.75}"#).unwrap();
+        assert_eq!(Config::path(&base), previous);
+        assert_eq!(Config::parse(&fs::read(Config::path(&base)).unwrap()).unwrap().music_volume, 0.75);
+        fs::write(&current, b"{}").unwrap();
+        assert_eq!(Config::path(&base), current);
+        fs::remove_file(current).unwrap();
+        fs::remove_file(previous).unwrap();
+        fs::remove_dir(base).unwrap();
+    }
+
     #[test]
     fn portable_config_keeps_existing_paths_and_split_config_overrides_them() {
         let mut config = Config::parse(br#"{"playnite_root":"C:\\Playnite"}"#).unwrap();

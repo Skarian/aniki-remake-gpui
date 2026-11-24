@@ -1,5 +1,5 @@
 """Exercise the real XInput path through the installed ViGEm driver.
-Run only while aniki-remake-gpui is foreground. Never installs or changes drivers.
+Run only while playnite-fullscreen-gpui is foreground. Never installs or changes drivers.
 """
 import sys, time, json
 from pathlib import Path
@@ -26,6 +26,6 @@ expected=['Right','Right','Left','NextPlatform','NextPlatform','PreviousPlatform
 result={'expected':expected,'observed':inputs,'passed':inputs==expected,'selection_events':[e for e in events if e['event']=='selection']}
 (root/'artifacts/controller-test.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
 print(json.dumps(result,indent=2))
-assert result['passed'], 'Controller input sequence differed; check aniki-remake-gpui focus.'
+assert result['passed'], 'Controller input sequence differed; check playnite-fullscreen-gpui focus.'
 
 if "--hold" in sys.argv: time.sleep(60)

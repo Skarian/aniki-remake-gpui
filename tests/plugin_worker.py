@@ -53,7 +53,7 @@ results.append(dict(case='parent-disconnect',passed=True))
 if a.probe:
     runner=out/'runner';(runner/'importer').mkdir(parents=True,exist_ok=True)
     shutil.copy2(a.probe,runner/'launch_probe.exe')
-    shutil.copy2(a.exe.parent/'importer/Aniki.PluginHost.dll',runner/'importer/Aniki.PluginHost.dll')
+    shutil.copy2(a.exe.parent/'importer/PlayniteFullscreen.PluginHost.dll',runner/'importer/PlayniteFullscreen.PluginHost.dll')
     subprocess.run([str(framework/'csc.exe'),'/nologo','/target:winexe',
         '/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll',
         '/out:'+str(game_dir/'WindowFixture.exe'),str(root/'tests/WindowFixture.cs')],check=True)
@@ -76,7 +76,7 @@ if a.probe:
         else: assert events[0]=='Started' and events[-1]=='Ended',events
         results.append(dict(case='rust-'+mode,passed=True,events=events))
 report=dict(sha256=hashlib.sha256(a.exe.read_bytes()).hexdigest(),
-    adapter_sha256=hashlib.sha256((a.exe.parent/'importer/Aniki.PluginHost.dll').read_bytes()).hexdigest(),
+    adapter_sha256=hashlib.sha256((a.exe.parent/'importer/PlayniteFullscreen.PluginHost.dll').read_bytes()).hexdigest(),
     probe_sha256=hashlib.sha256(a.probe.read_bytes()).hexdigest() if a.probe else None,cases=results)
 (out/'results.json').write_text(json.dumps(report,indent=2))
 print(json.dumps(report,indent=2))

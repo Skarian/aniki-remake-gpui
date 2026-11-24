@@ -33,21 +33,21 @@ jobs:
       - name: Release build
         run: ./build.ps1 -Release
       - name: Test split-library import
-        run: python tests/library_layout.py --importer importer/Aniki.Import.exe --playnite .tools/playnite --launcher target/release/aniki-remake-gpui.exe
+        run: python tests/library_layout.py --importer importer/PlayniteFullscreen.Import.exe --playnite .tools/playnite --launcher target/release/playnite-fullscreen-gpui.exe
       - name: Test plugin host contract
         run: |
           New-Item -ItemType Directory target/release/importer -Force | Out-Null
-          Copy-Item importer/Aniki.PluginHost.dll target/release/importer/
-          python tests/plugin_worker.py --exe target/release/aniki-remake-gpui.exe --playnite .tools/playnite
+          Copy-Item importer/PlayniteFullscreen.PluginHost.dll target/release/importer/
+          python tests/plugin_worker.py --exe target/release/playnite-fullscreen-gpui.exe --playnite .tools/playnite
       - name: Collect dependency notices
         run: ./scripts/collect-licenses.ps1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: app
           path: |
-            target/release/aniki-remake-gpui.exe
-            importer/Aniki.Import.exe
-            importer/Aniki.PluginHost.dll
+            target/release/playnite-fullscreen-gpui.exe
+            importer/PlayniteFullscreen.Import.exe
+            importer/PlayniteFullscreen.PluginHost.dll
             artifacts/licenses/
           if-no-files-found: error
 
@@ -95,9 +95,9 @@ jobs:
         run: |
           $version = (Select-String '^version = "([^"]+)"' Cargo.toml | Select-Object -First 1).Matches.Groups[1].Value
           ./package.ps1 -Portable -FFmpegRoot artifacts/media-build/ffmpeg
-          ./scripts/check-package.ps1 -Package dist/aniki-remake-gpui
-          Compress-Archive -Path dist/aniki-remake-gpui -DestinationPath "dist/aniki-remake-gpui-v$version-windows-x64.zip"
-          Copy-Item artifacts/media-build/media-sources.tar.gz "dist/aniki-remake-gpui-v$version-media-sources.tar.gz"
+          ./scripts/check-package.ps1 -Package dist/playnite-fullscreen-gpui
+          Compress-Archive -Path dist/playnite-fullscreen-gpui -DestinationPath "dist/playnite-fullscreen-gpui-v$version-windows-x64.zip"
+          Copy-Item artifacts/media-build/media-sources.tar.gz "dist/playnite-fullscreen-gpui-v$version-media-sources.tar.gz"
           Get-ChildItem dist -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName).Hash.ToLowerInvariant(), $_.Name } | Set-Content dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

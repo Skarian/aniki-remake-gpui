@@ -23,7 +23,7 @@ loopback=sc.get_microphone(id=device.id,include_loopback=True)
 assert loopback.isloopback
 audio=loopback.record(samplerate=48000,numframes=int(seconds*48000))
 wav=folder/(label+'.wav');sf.write(wav,audio,48000,subtype='FLOAT')
-config=json.loads((root/'aniki-remake-gpui.json').read_text(encoding='utf-8-sig'))
+config=json.loads((root/'playnite-fullscreen-gpui.json').read_text(encoding='utf-8-sig'))
 result=subprocess.run([config['ffmpeg'],'-hide_banner','-i',str(wav),'-af','loudnorm=I=-18:TP=-1:LRA=11:print_format=json','-f','null','-'],capture_output=True,text=True)
 meter=result.stderr[result.stderr.rfind('{'):].strip()
 data=dict(label=label,seconds=seconds,device=device.name,sessions=sessions,peak_dbfs=float(20*np.log10(max(np.abs(audio).max(),1e-12))),rms_dbfs=float(20*np.log10(max(np.sqrt(np.mean(audio**2)),1e-12))),loudness=json.JSONDecoder().raw_decode(meter)[0] if meter.startswith('{') else result.stderr[-500:])

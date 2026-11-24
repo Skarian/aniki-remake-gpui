@@ -2,11 +2,11 @@ param([Parameter(Mandatory)][string]$Package)
 $ErrorActionPreference = 'Stop'
 $Package = (Resolve-Path $Package).Path
 $dlls = @(Get-ChildItem $Package -Filter *.dll -Recurse)
-if ($dlls.Count -ne 1 -or $dlls[0].Name -ne 'Aniki.PluginHost.dll') { throw 'Unexpected DLLs in package' }
+if ($dlls.Count -ne 1 -or $dlls[0].Name -ne 'PlayniteFullscreen.PluginHost.dll') { throw 'Unexpected DLLs in package' }
 foreach ($entry in (Get-Content "$Package/package-files.json" -Raw | ConvertFrom-Json)) {
     if ((Get-FileHash (Join-Path $Package $entry.path)).Hash -ne $entry.sha256) { throw "Bad package hash: $($entry.path)" }
 }
-$config = Get-Content "$Package/aniki-remake-gpui.json" -Raw | ConvertFrom-Json
+$config = Get-Content "$Package/playnite-fullscreen-gpui.json" -Raw | ConvertFrom-Json
 if ($config.ffmpeg -ne '' -or (Test-Path "$Package/cache")) { throw 'Package contains local state' }
 $ffmpeg = "$Package/tools/ffmpeg/bin/ffmpeg.exe"
 $probe = "$Package/tools/ffmpeg/bin/ffprobe.exe"

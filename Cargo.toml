@@ -1,5 +1,5 @@
 [package]
-name = "aniki-remake-gpui"
+name = "playnite-fullscreen-gpui"
 version = "0.1.0"
 edition = "2024"
 description = "A fast standalone fullscreen launcher for a Playnite library"

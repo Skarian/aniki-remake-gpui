@@ -16,7 +16,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Newtonsoft.Json.Serialization;
 
-public static class AnikiPluginHost {
+public static class PlayniteFullscreenPluginHost {
     internal static string Root, DataRoot, Scratch, PluginDir;
     internal static JsonSerializerSettings Json;
     static readonly object OutputLock = new object();
@@ -123,11 +123,11 @@ class ApiProxy:RealProxy {
     readonly Type type;
     internal ApiProxy(Type type):base(type) {this.type=type;}
     static object ReadJson(string method,object input,Type result) {
-        if(method=="FromJson") return JsonConvert.DeserializeObject((string)input,result,AnikiPluginHost.Json);
+        if(method=="FromJson") return JsonConvert.DeserializeObject((string)input,result,PlayniteFullscreenPluginHost.Json);
         var stream=method=="FromJsonFile"?File.OpenRead((string)input):(Stream)input;
         using(var reader=new StreamReader(stream))
         using(var json=new JsonTextReader(reader))
-            return JsonSerializer.Create(AnikiPluginHost.Json).Deserialize(json,result);
+            return JsonSerializer.Create(PlayniteFullscreenPluginHost.Json).Deserialize(json,result);
     }
     public override IMessage Invoke(IMessage raw) {
         var call=(IMethodCallMessage)raw;
@@ -147,23 +147,23 @@ class ApiProxy:RealProxy {
                 }
                 if(method.Name=="FromJsonFile" || method.Name=="FromJson" || method.Name=="FromJsonStream")
                     value=ReadJson(method.Name,call.Args[0],method.GetGenericArguments()[0]);
-                else if(method.Name=="ToJson") value=JsonConvert.SerializeObject(call.Args[0],AnikiPluginHost.Json);
-                else if(method.Name=="GetClone") value=JsonConvert.DeserializeObject(JsonConvert.SerializeObject(call.Args[0],AnikiPluginHost.Json),method.GetGenericArguments().Last(),AnikiPluginHost.Json);
+                else if(method.Name=="ToJson") value=JsonConvert.SerializeObject(call.Args[0],PlayniteFullscreenPluginHost.Json);
+                else if(method.Name=="GetClone") value=JsonConvert.DeserializeObject(JsonConvert.SerializeObject(call.Args[0],PlayniteFullscreenPluginHost.Json),method.GetGenericArguments().Last(),PlayniteFullscreenPluginHost.Json);
                 else throw new NotSupportedException("Unimplemented serializer: "+method.Name);
             }
             else if(type==typeof(IPlayniteAPI) && method.Name.StartsWith("get_") && method.ReturnType.IsInterface)
                 value=new ApiProxy(method.ReturnType).GetTransparentProxy();
             else if(type==typeof(IPlaynitePathsAPI)) {
                 switch(method.Name) {
-                    case "get_ExtensionsDataPath":value=Path.Combine(AnikiPluginHost.Scratch,"data");break;
-                    case "get_ConfigurationPath":value=AnikiPluginHost.Scratch;break;
-                    case "get_ApplicationPath":value=AnikiPluginHost.Root;break;
-                    case "get_IsPortable":value=!File.Exists(Path.Combine(AnikiPluginHost.Root,"unins000.exe"));break;
+                    case "get_ExtensionsDataPath":value=Path.Combine(PlayniteFullscreenPluginHost.Scratch,"data");break;
+                    case "get_ConfigurationPath":value=PlayniteFullscreenPluginHost.Scratch;break;
+                    case "get_ApplicationPath":value=PlayniteFullscreenPluginHost.Root;break;
+                    case "get_IsPortable":value=!File.Exists(Path.Combine(PlayniteFullscreenPluginHost.Root,"unins000.exe"));break;
                     default:throw new NotSupportedException(method.Name);
                 }
             } else if(type==typeof(IPlayniteInfoAPI)) {
                 if(method.Name=="get_Mode") value=ApplicationMode.Fullscreen;
-                else if(method.Name=="get_ApplicationVersion") value=Version.Parse(System.Diagnostics.FileVersionInfo.GetVersionInfo(Path.Combine(AnikiPluginHost.Root,"Playnite.DesktopApp.exe")).FileVersion);
+                else if(method.Name=="get_ApplicationVersion") value=Version.Parse(System.Diagnostics.FileVersionInfo.GetVersionInfo(Path.Combine(PlayniteFullscreenPluginHost.Root,"Playnite.DesktopApp.exe")).FileVersion);
                 else if(method.ReturnType==typeof(bool)) value=false;
                 else throw new NotSupportedException(method.Name);
             } else if(type==typeof(IPlayniteSettingsAPI) && method.Name=="get_Language") value="en_US";

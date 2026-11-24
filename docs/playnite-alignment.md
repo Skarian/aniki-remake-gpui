@@ -1,38 +1,43 @@
-> Plugin-host update: newly normalized storefront games now call the installed DLL itself, rather than the historical Steam Rust port described below. See [plugin-host.md](plugin-host.md). The retained-window focus/return contract is unchanged. The old Steam branch remains only for cached pre-update plans.
+# Playnite behavior
 
-# Playnite lifecycle alignment
+The launch and return flow follows Playnite's fullscreen mode. Reference source: [JosefNemec/Playnite at `e2e6efc`](https://github.com/JosefNemec/Playnite/tree/e2e6efcda311fea38fcd92f61c8ca90811d97f28).
 
-Reference: [JosefNemec/Playnite at e2e6efc](https://github.com/JosefNemec/Playnite/tree/e2e6efcda311fea38fcd92f61c8ca90811d97f28). Inspected the existing pinned checkout read-only; did not fetch or modify it.
-
-| Concern | Playnite source | This launcher |
+| Behavior | Playnite | This launcher |
 | --- | --- | --- |
-| Direct executable launch | `source/Playnite/Common/ProcessStarter.cs`, `StartProcess`: `ProcessStartInfo` with shell execution, arguments, and working directory | `src/launch.rs`, `start_process`: `ShellExecuteExW`, argument string, working directory, retained process handle |
-| Default emulator lifetime | `source/Playnite/Controllers/GenericGameController.cs`, `StartEmulatorProcess`: `MonitorProcessTree` | Launched PID plus descendants; no unrelated executable-directory matching for direct launches |
-| Process-tree membership | `source/Playnite/Common/ProcessMonitor.cs`, `MonitorProcessTree`: retain currently running related IDs | Follow descendants and prune exited IDs on each observation |
-| Details on return | `source/Playnite.FullscreenApp/ViewModels/FullscreenAppViewModel.cs`, `Controllers_Stopped`: remove status view and refocus existing Details/list | Preserve the existing view state, selection, collection, and Details scroll position |
-| Restore focus | `source/Playnite/Windows/WindowFactory.cs`, `RestoreWindow`: show/restore, activate, temporarily attach input threads | `src/focus.rs` uses the equivalent Win32 operations and explicitly manages fullscreen topmost state |
-| UI lifetime | Existing application/window remains alive; `GamesEditor.cs` minimizes only when `Fullscreen.MinimizeAfterGameStartup` is enabled | One visible GPUI window with game-status artwork underneath gameplay; no minimization, black-cover host, or frontend restart |
+| Start an executable | `ProcessStarter.StartProcess`: shell execute with arguments and working directory | `launch.rs`: `ShellExecuteExW`, keeping the process handle |
+| Emulator lifetime | `GenericGameController.StartEmulatorProcess`: process tree | Launched PID plus descendants |
+| Process tree | `ProcessMonitor.MonitorProcessTree`: keep running related IDs | Follow descendants, drop exited IDs each scan |
+| Storefront games | Library plugin's play controller | The same plugin DLL, in a worker process ([plugin host](plugin-host.md)) |
+| Return from a game | `FullscreenAppViewModel.Controllers_Stopped`: remove status view, refocus Details | Same Details page, collection and scroll position |
+| Restore focus | `WindowFactory.RestoreWindow`: restore, activate, attach input threads | `focus.rs`: the same Win32 calls |
+| Window during play | Stays open; minimizes if `MinimizeAfterGameStartup` is on | Stays open with the status screen (Playnite's `MinimizeAfterGameStartup=false` behavior) |
 
-## Intentional differences
+## Launch sequence
 
-- The renderer and media are GPUI/FFmpeg/SDL rather than WPF. The retained fullscreen surface and selected background/logo/cover cost more memory than a minimized window. Video, audio, outgoing transitions, and unrelated artwork are released during gameplay.
-- This matches Playnite's supported `MinimizeAfterGameStartup=false` mode; Playnite defaults that option to true. Status artwork is resolved before launch, and dispatch is queued from the status render for the following frame. Missing or stalled artwork has an opaque fallback after two seconds. Launching-to-Running and return transitions do not fade the whole scene to black.
-- The orbit animation updates at roughly 30 Hz while the launcher has focus or holds the launch cover. A game taking focus beneath the cover does not stop it. After handoff, timeout or Back releases the cover, the unfocused launcher retains its last animation frame. No repeated z-order enforcement is used. Automatic handoff and return deliberately reclaim focus, including over another app. Back opts out. Only the launch cover stays topmost; cancel, failure, expiry, handoff and completion demote it. Ordinary native restore is scheduled outside GPUI update borrows. Held input is gated on focus regain and return.
-- Native Started is emitted at a successful, nonzero-PID spawn. Native lifetime uses an immediate scan and two-second decisions, ending at the first complete empty observation. Faster 350 ms pre-handoff descendant discovery and fixed-point expansion are retained differences from core. Failed or partial snapshots are unknown; missing image paths do not remove native PIDs. Five consecutive failed lifetime observations release tracking with an error, without claiming the game exited or forcing focus. Core resets its failure counter ineffectively; that bug is not copied. Completion runs from tick, with core?s one-second delay implemented without blocking.
-- Steam invokes the installed client directly with `-silent "steam://rungameid/<id>"`, matching `SteamPlayController.Play` in the locally installed `SteamLibrary_Builtin/SteamLibrary.dll`. Client discovery reads HKCU SteamPath and appends steam.exe, like the installed extension. Launch workers initialize COM and preserve the underlying Windows error. The directory monitor scans immediately, starts on the first match and stops on the first later empty two-second lifetime observation. Registry Running, pre-launch PID exclusion, readiness-dependent stop and the startup-failure deadline are removed. Canonicalized paths use a separator boundary rather than upstream?s substring test. A missing or unresolvable directory fails before dispatch rather than after dispatch. Pre-existing and lingering same-directory processes count; never-matching attempts require cancellation. This is not a port of the entire extension or its optional Steam launch-menu setting.
-- Advanced tracking modes, hooks, extension callbacks, and playtime/database writes are not implemented. Unsupported launch scripts/actions are rejected.
-- Repeated launches use a Windows named mutex/event to activate the retained window. Extra invocations wait for that session to end for external launcher compatibility.
+1. The status screen shows the game's background, logo and an orbit animation. Its artwork is resolved before launch, and the launch is dispatched on the next frame. If artwork is slow, an opaque fallback appears after two seconds.
+2. The launch cover stays topmost until a game window is ready: visible, not minimized, responsive, at least 320×180, not a splash or crash reporter, and stable for 1.5 seconds. Checks run every 350 ms. This matches the readiness check of the Aniki ReMake theme's helper, without a separate splash window.
+3. Focus passes to the game and the launcher drops topmost. The status screen stays underneath. Music and video stop, and the animation pauses while the launcher is in the background.
+4. If no window is ready after 90 seconds, the cover is released and tracking continues. A window that becomes ready later still gets focus.
 
-A window disappearing does **not** mean a game process exited. The temporary black-cover recovery heuristic was removed with that architecture. If an emulator leaves its process running after closing its window, opening the launcher again restores its existing window; Back dismisses its running status without stopping process tracking.
+Back before Started cancels the launch without killing anything. Back after Started dismisses the cover and turns off automatic return for that session.
 
-## Installed Aniki splash comparison (2026-11-09)
+## Tracking and return
 
-The local theme is Aniki ReMake 3.6.0 with AnikiHelper 1.7.0. Read-only inspection of the installed helper assembly and configuration showed a separate opaque, topmost splash window. This PC has that feature enabled, with a 2.4-second minimum and a 90-second maximum. Its readiness service checks the same candidate process/window three times at 500 ms intervals and filters hidden, minimized, hung, small, and splash-like windows. Thus core Playnite's window behavior alone does not describe this PC's launch transition.
+Native tracking scans immediately, then every two seconds, and ends at the first complete scan with no tracked process. Before handoff, descendants are found every 350 ms. Failed scans count as unknown; five failures in a row release tracking with an error and do not claim the game exited.
 
-Our existing status window supplies that protection without a second splash window: a tracked game's visible, non-minimized, responsive client window (at least 320×180, excluding splash/crash-reporter titles) must remain the candidate for 1.5 seconds. Polling is 350 ms. Replaced or disappearing candidates restart the interval. Then focus is handed over and the status window loses topmost status. Automatic sessions deliberately activate the game; Back opts out. Back can dismiss the cover, and the 90-second timeout releases it while tracking continues and permits a later ready-window handoff. This approximates Aniki's readiness behavior; it does not duplicate all of its title/class/coverage heuristics or its fixed minimum duration.
+When the game exits, the launcher waits one second, then returns the same window to Details and takes focus. Held buttons must be released before input resumes. If you browsed elsewhere during play, your place is kept.
 
-Launch resolution and variable-expansion behavior adapted from Playnite is covered by its MIT notice in `THIRD_PARTY_NOTICES.txt`. Interactive tests in `tests/retained_lifecycle.py` cover retained PID/HWND visibility, foreground ownership, lingering/crashed games, manual navigation, and held Xbox/PS return input. These tests take control of the desktop and must be run only when it is available. Source/unit checks cannot establish frame-by-frame absence of desktop exposure; real Steam/splash and exclusive-fullscreen transitions also require runtime checks.
+An emulator that closes its window but keeps running is still a running game, as in Playnite. Opening the launcher again shows its status screen; Back returns to the library without stopping tracking. Only one game session runs at a time.
 
-Pending cancellation uses a per-session flag checked before dispatch and on each worker iteration. It releases the lock without killing anything; dispatch can race cancellation, leaving a late game untracked. A disconnected worker releases the lock with an error. Terminal events suppress queued readiness handoffs. One active session, the external same-executable refusal, valid native PID checks, and missing-path preflight errors are deliberate scope/correctness differences. No database playtime or activity writeback is performed.
+## Differences from Playnite
 
-Steam migration was gated on two Playnite/Aniki HELLDIVERS reference traces sampled at 200 ms (maximum observed intervals 201.232/212.957 ms). Both had continuous matched membership, no snapshot failures and no boundary/substring predicate differences. Replaying two-second sampling at 2,000 millisecond phase offsets produced one start and one stop. Some other PID image queries were unavailable; finite traces do not establish universal Steam compatibility. Candidate real-game checks remain separate release gates.
+- Rendering uses GPUI, FFmpeg and SDL instead of WPF.
+- Not implemented: scripts, multi-action selection, advanced tracking modes, extension hooks, and playtime or database writes. Unsupported actions show an error.
+- Process IDs and missing paths are checked before dispatch, so a bad action fails early.
+- A second start of the same executable activates the open window. While a game runs, the extra process waits for the session to end, so external launchers such as Apollo see a live process.
+
+Launch-variable expansion follows Playnite's `GameExtensions.cs` and is covered by its MIT notice in [THIRD_PARTY_NOTICES.txt](../THIRD_PARTY_NOTICES.txt).
+
+## Earlier Steam tracking
+
+Before the [plugin host](plugin-host.md) (2026-11-21), Steam games launched natively with `steam.exe -silent "steam://rungameid/<id>"` and were tracked by install directory. That migration was checked on 2026-11-10 against two Playnite reference traces of HELLDIVERS 2 sampled every 200 ms; replaying them at two-second sampling, across the tested phase offsets, gave exactly one start and one stop. The code remains only for plans cached by that build.

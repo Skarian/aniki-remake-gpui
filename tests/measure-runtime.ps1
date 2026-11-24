@@ -1,7 +1,7 @@
 param([string]$Name='idle', [int]$Seconds=5, [int]$LauncherPid=0, [string]$OutputPath='')
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot
-$launcher=if($LauncherPid){@(Get-Process -Id $LauncherPid)}else{@(Get-Process -Name aniki-remake-gpui)}
+$launcher=if($LauncherPid){@(Get-Process -Id $LauncherPid)}else{@(Get-Process -Name playnite-fullscreen-gpui)}
 if($launcher.Count -ne 1){throw 'Expected one running launcher'}
 $children=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($launcher[0].Id)" | Where-Object Name -eq 'ffmpeg.exe')
 $ids=@($launcher[0].Id)+@($children | ForEach-Object ProcessId)

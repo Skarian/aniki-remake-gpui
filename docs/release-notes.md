@@ -1,24 +1,29 @@
-﻿First public version of Aniki Remake GPUI: a minimal fullscreen Windows launcher for an existing Playnite library.
+﻿The first release of Playnite Fullscreen GPUI: a fast, console-style fullscreen launcher for your Playnite library, written in Rust with GPUI.
 
-## Download and setup
+## Highlights
 
-Download **aniki-remake-gpui-v0.1.0-windows-x64.zip**, extract the whole folder, and edit `aniki-remake-gpui.json` beside the executable with your Playnite paths. Keep `assets`, `importer`, and `tools` beside it. Playnite can stay closed while you use the launcher.
+- Opens in about 0.3 seconds in local benchmarks.
+- Covers, backgrounds, logos, descriptions, music, trailers and platform art from your Playnite library, with live library updates.
+- Xbox controller, PlayStation controller and keyboard input together, with matching button prompts.
+- Trailers at up to 4K and 60 fps.
+- A status screen stays behind the running game. When the game closes you return to its Details page.
+- Steam, Epic, GOG, Xbox, Ubisoft and Battle.net launch through your installed Playnite integrations. Emulator and executable actions are supported too.
+- Works with portable Playnite, or with Playnite's program, data and library in separate folders.
+- Works standalone or with Apollo/Moonlight.
 
-SDL and the native C runtime are statically linked. FFmpeg/ffprobe are included. **Playnite DLLs, storefront plugins, games and media are not bundled**: use your configured Playnite installation. Requires Windows x64 and a DirectX 11-capable GPU. The executable is unsigned.
+## Install
 
-## Included
+1. Download `playnite-fullscreen-gpui-v0.1.0-windows-x64.zip`.
+2. Extract the whole folder.
+3. Set your Playnite folder in `playnite-fullscreen-gpui.json`.
+4. Run `playnite-fullscreen-gpui.exe`.
 
-- Keyboard and Xbox/PlayStation navigation and prompts.
-- Playnite covers, backgrounds, logos, descriptions, platform collections, music and trailers.
-- Separate Details and trailer pages, with a retained game-status screen during play.
-- Game launch tracking and automatic return to Details.
-- Portable and separate Playnite program/data/library folder layouts.
-- Standalone use or Apollo/Moonlight streaming.
+Requires Windows x64, a DirectX 11 GPU and Playnite 10. FFmpeg is included. The launcher uses the Playnite and storefront DLLs from your own Playnite installation. Playnite can stay closed. The executable is not code-signed.
 
-## Scope
+See the [README](https://github.com/Skarian/playnite-fullscreen-gpui#setup) for configuration and controls.
 
-Steam has real-game launch/return coverage. GOG has an actual-plugin action check. Epic, Xbox, Ubisoft and Battle.net adapters are experimental. Login/import dialogs, library editing, scripts, advanced multi-action selection and playtime writeback are not included. Physical DualSense USB/Bluetooth and all-game compatibility are not certified.
+## Downloads
 
-See the [README](https://github.com/Skarian/aniki-remake-gpui#setup) for setup and controls and [release build details](https://github.com/Skarian/aniki-remake-gpui/blob/main/docs/releases.md) for checks and dependencies.
-
-The media-source archive contains matching FFmpeg/dav1d sources and build materials. The Windows ZIP includes the applicable notices. `SHA256SUMS.txt` covers both downloads.
+- `playnite-fullscreen-gpui-v0.1.0-windows-x64.zip`: the launcher.
+- `playnite-fullscreen-gpui-v0.1.0-media-sources.tar.gz`: FFmpeg and dav1d sources and build files for the included media tools.
+- `SHA256SUMS.txt`: checksums for both.

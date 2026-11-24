@@ -4,7 +4,7 @@ $root=Split-Path $PSScriptRoot
 $results=@()
 for($i=1;$i -le $Runs;$i++){
  $timer=[Diagnostics.Stopwatch]::StartNew()
- $process=Start-Process -FilePath (Join-Path $root 'aniki-remake-gpui.exe') -ArgumentList '--benchmark' -WorkingDirectory $root -WindowStyle Normal -PassThru
+ $process=Start-Process -FilePath (Join-Path $root 'playnite-fullscreen-gpui.exe') -ArgumentList '--benchmark' -WorkingDirectory $root -WindowStyle Normal -PassThru
  if(-not $process.WaitForExit(15000)){throw 'Benchmark app did not exit within 15 seconds'}
  $events=Get-Content -LiteralPath (Join-Path $root 'artifacts\session.jsonl') | ForEach-Object {$_ | ConvertFrom-Json} | Where-Object pid -eq $process.Id
  $frame=$events | Where-Object event -eq 'first_frame_callback' | Select-Object -First 1

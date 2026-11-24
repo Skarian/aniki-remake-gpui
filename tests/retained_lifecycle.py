@@ -7,7 +7,7 @@ root=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(root/'.tools/python'))
 import vgamepad as vg
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--exe',type=Path,default=root/'target/release/aniki-remake-gpui.exe')
+parser.add_argument('--exe',type=Path,default=root/'target/release/playnite-fullscreen-gpui.exe')
 parser.add_argument('--expected-sha256',required=True,help='Hash recorded after the intended build')
 parser.add_argument('--label',default='candidate')
 parser.add_argument('--modes',help='Comma-separated mode or controller:mode selections')
@@ -29,13 +29,13 @@ report['initial_foreground']='explicit setup' if args.foreground_setup else 'aut
 result_path=app.parent/'results.json'
 result_path.write_text(json.dumps(report,indent=2))
 print(f'Results: {result_path}',flush=True)
-shutil.copy2(binary,app/'aniki-remake-gpui.exe')
-assert hashlib.sha256((app/'aniki-remake-gpui.exe').read_bytes()).hexdigest()==digest
+shutil.copy2(binary,app/'playnite-fullscreen-gpui.exe')
+assert hashlib.sha256((app/'playnite-fullscreen-gpui.exe').read_bytes()).hexdigest()==digest
 shutil.copytree(root/'assets',app/'assets',dirs_exist_ok=True)
 report['fixture_source']=str(args.fixture_source.resolve())
 report['fixture_sha256']=hashlib.sha256(args.fixture_source.read_bytes()).hexdigest()
 subprocess.run([r'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe','/nologo','/target:winexe','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/out:'+str(app/'WindowFixture.exe'),str(args.fixture_source)],check=True)
-(app/'aniki-remake-gpui.json').write_text(json.dumps(dict(playnite_root=str(app/'no-playnite'),fullscreen=True,music=False,video=False)))
+(app/'playnite-fullscreen-gpui.json').write_text(json.dumps(dict(playnite_root=str(app/'no-playnite'),fullscreen=True,music=False,video=False)))
 log=app/'artifacts/session.jsonl'
 u=c.WinDLL('user32'); k=c.WinDLL('kernel32')
 u.GetForegroundWindow.restype=c.c_void_p
@@ -54,7 +54,7 @@ def windows():
         title=c.create_unicode_buffer(256); cls=c.create_unicode_buffer(256); pid=c.c_ulong()
         u.GetWindowTextW(c.c_void_p(hwnd),title,256);u.GetClassNameW(c.c_void_p(hwnd),cls,256)
         u.GetWindowThreadProcessId(hwnd,c.byref(pid))
-        if title.value=='aniki-remake-gpui' or cls.value=='AnikiSessionBlack': out.append((hwnd,pid.value,cls.value))
+        if title.value=='playnite-fullscreen-gpui' or cls.value=='AnikiSessionBlack': out.append((hwnd,pid.value,cls.value))
         return True
     u.EnumWindows(visit,None)
     return out
@@ -144,7 +144,7 @@ for family,mode in cases:
     owner=None; followers=[]; handle=None; sentinels=[]
     output=open(app/'artifacts'/f'stderr-{family}-{mode}.log','wb')
     try:
-        owner=subprocess.Popen([str(app/'aniki-remake-gpui.exe'),'--trace-motion','--trace-memory'],cwd=app,stdout=output,stderr=subprocess.STDOUT)
+        owner=subprocess.Popen([str(app/'playnite-fullscreen-gpui.exe'),'--trace-motion','--trace-memory'],cwd=app,stdout=output,stderr=subprocess.STDOUT)
         wait(lambda r:any(e['event']=='startup_focus' for e in r))
         own=[w for w in windows() if w[1]==owner.pid]
         assert len(own)==1,own
@@ -181,7 +181,7 @@ for family,mode in cases:
         pad.reset();pad.update();time.sleep(.2)
         assert not any(w[2]=='AnikiSessionBlack' for w in windows())
         if mode=='crash':
-            follower=subprocess.Popen([str(app/'aniki-remake-gpui.exe')],cwd=app);followers.append(follower)
+            follower=subprocess.Popen([str(app/'playnite-fullscreen-gpui.exe')],cwd=app);followers.append(follower)
             wait(lambda r:any(e['event']=='session_activated' for e in r))
             owner.terminate();owner.wait(timeout=5)
             follower.wait(timeout=5);assert follower.returncode==0
@@ -286,7 +286,7 @@ for family,mode in cases:
                 time.sleep(2.5)
                 assert not any(e['event']=='game_ended' for e in events()),'Window close falsely ended process tracking'
                 assert page(events())=='running' and u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd)
-                follower=subprocess.Popen([str(app/'aniki-remake-gpui.exe')],cwd=app);followers.append(follower)
+                follower=subprocess.Popen([str(app/'playnite-fullscreen-gpui.exe')],cwd=app);followers.append(follower)
                 wait(lambda r:any(e['event']=='session_activated' for e in r))
                 assert not u.IsIconic(hwnd) and u.GetForegroundWindow()==hwnd
                 press('back'); assert page(events())=='details'
@@ -320,7 +320,7 @@ for family,mode in cases:
             assert sum(e['event']=='snapshot_loaded' for e in rows)==1
         # Duplicate invocation while browsing activates this exact window.
         n=sum(e['event']=='session_activated' for e in events())
-        follower=subprocess.Popen([str(app/'aniki-remake-gpui.exe')],cwd=app);followers.append(follower)
+        follower=subprocess.Popen([str(app/'playnite-fullscreen-gpui.exe')],cwd=app);followers.append(follower)
         wait(lambda r:sum(e['event']=='session_activated' for e in r)>n)
         # Activation is deferred; the diagnostic precedes actual foreground.
         wait(lambda _:u.GetForegroundWindow()==hwnd)

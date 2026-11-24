@@ -88,7 +88,7 @@ pub fn worker_main() -> i32 {
         let assembly = std::env::current_exe()?
             .parent()
             .unwrap()
-            .join("importer/Aniki.PluginHost.dll");
+            .join("importer/PlayniteFullscreen.PluginHost.dll");
         anyhow::ensure!(
             assembly.is_file(),
             "Plugin host is missing. Run importer/build.ps1."
@@ -110,7 +110,7 @@ pub fn worker_main() -> i32 {
             host.Start()?;
             Ok(host.ExecuteInDefaultAppDomain(
                 PCWSTR(assembly.as_ptr()),
-                w!("AnikiPluginHost"),
+                w!("PlayniteFullscreenPluginHost"),
                 w!("Run"),
                 PCWSTR(json.as_ptr()),
             )?)

@@ -35,10 +35,10 @@ subprocess.run([str(csc), '/nologo', '/out:' + str(tools/'Fixture.exe'),
 database = library / 'games.db'
 subprocess.run([str(tools/'Fixture.exe'), str(database)], check=True)
 before = hashlib.sha256(database.read_bytes()).hexdigest()
-shutil.copy2(a.importer, clean / 'Aniki.Import.exe')
+shutil.copy2(a.importer, clean / 'PlayniteFullscreen.Import.exe')
 assert list(clean.glob('*.dll')) == []
 snapshot = scratch / 'snapshot.json'
-subprocess.run([str(clean/'Aniki.Import.exe'), str(a.playnite.resolve()), str(snapshot),
+subprocess.run([str(clean/'PlayniteFullscreen.Import.exe'), str(a.playnite.resolve()), str(snapshot),
                 str(library), str(data)], check=True, capture_output=True, text=True)
 raw = json.loads(snapshot.read_text())
 assert Path(raw['root']) == a.playnite.resolve(), raw
@@ -57,7 +57,7 @@ if a.launcher:
 portable_library = a.playnite / 'library'
 if portable_library.is_dir():
     legacy = scratch / 'portable.json'
-    subprocess.run([str(clean/'Aniki.Import.exe'), str(a.playnite.resolve()), str(legacy)],
+    subprocess.run([str(clean/'PlayniteFullscreen.Import.exe'), str(a.playnite.resolve()), str(legacy)],
                     check=True, capture_output=True, text=True)
     portable = json.loads(legacy.read_text())
     assert portable['root'] == portable['data_root']

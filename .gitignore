@@ -17,7 +17,8 @@ importer/*.exe
 importer/*.dll
 dist/
 tools/ffmpeg/
-aniki-remake-gpui.exe
+playnite-fullscreen-gpui.exe
+playnite-fullscreen-gpui.json
 aniki-remake-gpui.json
 benchmarks/
 *.dll
