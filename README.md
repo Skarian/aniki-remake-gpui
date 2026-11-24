@@ -2,7 +2,7 @@
 
 A fast, console-style fullscreen launcher for your Playnite library on Windows. Written in Rust with [GPUI](https://www.gpui.rs/), it starts in about 0.3 seconds and reads your Playnite library directly, so Playnite can stay closed.
 
-![Cyberpunk 2077 on the Home screen](docs/screenshots/home.jpg)
+![Cyberpunk 2077 on the Home screen](docs/screenshots/home.png)
 
 [Download v0.1.0](https://github.com/Skarian/playnite-fullscreen-gpui/releases/tag/v0.1.0) · [Setup](#setup) · [Controls](#controls) · [Build from source](docs/development.md)
 
@@ -16,9 +16,9 @@ A fast, console-style fullscreen launcher for your Playnite library on Windows. 
 - **Your storefronts.** Steam, Epic, GOG, Xbox, Ubisoft and Battle.net games launch through your installed Playnite integrations. Emulators and executable actions work too.
 - **Couch streaming.** Works standalone or as an Apollo/Moonlight app.
 
-![DAVE THE DIVER game status screen](docs/screenshots/running.jpg)
+![DAVE THE DIVER game status screen](docs/screenshots/running.png)
 
-![Hades II Details page](docs/screenshots/details.jpg)
+![Hades II Details page](docs/screenshots/details.png)
 
 ## Setup
 
